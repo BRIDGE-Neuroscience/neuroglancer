@@ -32,9 +32,9 @@
  *      {@link ShardedKvStore} (suffix index read + crc32c decode + inner
  *      byte-range GET) rather than re-implement it.
  *
- * Both cases return the raw stored cell bytes (the numcodecs `vlen-bytes`
- * container); callers decode them exactly as before. Detection is per-array
- * from its own `zarr.json` (see `ChunkGridDescriptor`), so an unsharded,
+ * Both cases decompress Zstd frames before returning the numcodecs
+ * `vlen-bytes` container; uncompressed cells pass through unchanged. Detection
+ * is per-array from its own `zarr.json` (see `ChunkGridDescriptor`), so an unsharded,
  * zero-origin store reduces to the historical behaviour.
  *
  * Backend-only: instantiate one {@link ShardCellReader} per source so its
@@ -48,6 +48,8 @@ import "#src/datasource/zarr/codec/bytes/decode.js";
 import "#src/datasource/zarr/codec/crc32c/resolve.js";
 import "#src/datasource/zarr/codec/crc32c/decode.js";
 
+import { decodeZstd } from "#src/async_computation/decode_zstd_request.js";
+import { requestAsyncComputation } from "#src/async_computation/request.js";
 import type { ChunkManager } from "#src/chunk_manager/backend.js";
 import { parseCodecChainSpec } from "#src/datasource/zarr/codec/resolve.js";
 import { ShardedKvStore } from "#src/datasource/zarr/codec/sharding_indexed/decode.js";
@@ -194,18 +196,40 @@ export class ShardCellReader extends RefCounted {
     const { arrayIndex, shard, inner } = resolveChunkCell(this.grid, chunkKey);
     if (shard === undefined) {
       // Unsharded: one whole file per 0-based cell.
-      return this.wholeFileRead(
+      const bytes = await this.wholeFileRead(
         `${arrayPath}/c/${arrayIndex.join(separator)}`,
         signal,
       );
+      return decodeCellCompression(bytes, signal);
     }
     const response = await this.shardedKvStore!.read(
       { base: `${arrayPath}/c/${shard.join(separator)}`, subChunk: inner! },
       { signal },
     );
     if (response === undefined) return undefined;
-    return new Uint8Array(
-      (await response.response.arrayBuffer()) as ArrayBuffer,
+    return decodeCellCompression(
+      new Uint8Array(await response.response.arrayBuffer()),
+      signal,
     );
   };
+}
+
+/** Remove the outer Zstd frame before callers read the vlen-bytes header. */
+async function decodeCellCompression(
+  bytes: Uint8Array | undefined,
+  signal: AbortSignal,
+): Promise<Uint8Array | undefined> {
+  if (
+    bytes === undefined ||
+    bytes.length < 4 ||
+    bytes[0] !== 0x28 ||
+    bytes[1] !== 0xb5 ||
+    bytes[2] !== 0x2f ||
+    bytes[3] !== 0xfd
+  )
+    return bytes;
+  // Own the buffer before transferring it: a whole-file reader may cache bytes
+  // or return a view into a larger buffer.
+  const input = new Uint8Array(bytes);
+  return requestAsyncComputation(decodeZstd, signal, [input.buffer], input);
 }
