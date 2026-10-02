@@ -19,6 +19,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isSameOrigin,
+  isSelfReference,
   viewerUrlWithState,
 } from "../../ngpy/src/host/viewer_host.js";
 import {
@@ -123,6 +124,15 @@ describe("hosting", () => {
   it("knows same-origin from cross-origin builds", () => {
     expect(isSameOrigin("./index.html", "http://a.test/ngpy.html")).toBe(true);
     expect(isSameOrigin("https://b.test/", "http://a.test/ngpy.html")).toBe(
+      false,
+    );
+  });
+
+  it("refuses to host itself (ngpy.html saved as a build's index.html)", () => {
+    expect(
+      isSelfReference("./index.html", "http://a.test/index.html?x=1"),
+    ).toBe(true);
+    expect(isSelfReference("./index.html", "http://a.test/ngpy.html")).toBe(
       false,
     );
   });

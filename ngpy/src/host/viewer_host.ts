@@ -37,6 +37,20 @@ export function isSameOrigin(
   }
 }
 
+/** Whether `url` is the wrapper page itself (e.g. ngpy.html saved as index.html). */
+export function isSelfReference(
+  url: string,
+  page: string = window.location.href,
+): boolean {
+  try {
+    const a = new URL(url, page);
+    const b = new URL(page);
+    return a.origin === b.origin && a.pathname === b.pathname;
+  } catch {
+    return false;
+  }
+}
+
 /** The iframe URL for a Neuroglancer build plus an optional state hash. */
 export function viewerUrlWithState(ngUrl: string, state?: unknown): string {
   const base = ngUrl.replace(/#.*$/, "");
@@ -50,6 +64,8 @@ export class ViewerHost {
   readonly viewerChanged = new Signal();
   viewer: any = undefined;
   crossOriginDetected = false;
+  /** `?ng=` resolved to this very page; nothing is loaded (it would recurse). */
+  readonly selfReference: boolean;
   readonly ready: Promise<any>;
 
   constructor(
@@ -63,8 +79,13 @@ export class ViewerHost {
     iframe.className = "ngpy-viewer-frame";
     iframe.title = "Neuroglancer";
     iframe.allow = "clipboard-read; clipboard-write; fullscreen";
-    iframe.src = viewerUrlWithState(ngUrl, initialState);
+    this.selfReference = isSelfReference(ngUrl);
     container.appendChild(iframe);
+    if (this.selfReference) {
+      this.ready = Promise.resolve(undefined);
+      return;
+    }
+    iframe.src = viewerUrlWithState(ngUrl, initialState);
     this.ready = this.waitForViewer();
   }
 

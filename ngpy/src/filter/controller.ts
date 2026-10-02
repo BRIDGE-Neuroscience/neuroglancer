@@ -457,6 +457,17 @@ export class FilterController {
         });
         continue;
       }
+      if (shape?.type !== "box" && shape?.type !== "ellipsoid") {
+        // No annotation type for it (halfspace): keep it, undrawn.
+        rois.push({
+          kind: "shape",
+          shape,
+          operator: r.operator,
+          predicate: r.predicate,
+          name: r.name,
+        });
+        continue;
+      }
       if (scales === undefined) throw new Error("Select a target layer first");
       const id = randomAnnotationId();
       const ann = shapeToAnnotation(shape, scales, id);

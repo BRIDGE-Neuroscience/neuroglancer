@@ -138,6 +138,23 @@ describe("FilterModel", () => {
     });
   });
 
+  it("keeps an undrawable (halfspace) region verbatim", () => {
+    const m = new FilterModel();
+    const shape = {
+      type: "halfspace" as const,
+      origin: [0, 0, 0],
+      normal: [0, 0, 1],
+    };
+    const g = m.addGroup({
+      rois: [
+        { kind: "shape", shape, operator: "andnot", predicate: "any_segment" },
+      ],
+    });
+    expect(m.groupJson(g, new Map(), MM).rois).toEqual([
+      { shape, predicate: "any_segment", operator: "andnot" },
+    ]);
+  });
+
   it("evaluates committed groups plus the white preview", () => {
     const m = new FilterModel();
     m.addGroup({ name: "g", visible: false });

@@ -96,6 +96,11 @@ layout, the row itself under V1).
 Colour-by presets write `skeletonRendering.shader` (+ `shaderControls`) on the
 same layer. Group colours only show with the "Segment / group colour" preset.
 
+Standard segment state has no per-segment alpha, so a group's `opacity` is kept
+(in documents and the page state) but not rendered; and whether
+`notSelectedAlpha` visibly "ghosts" non-passing skeletons is up to the
+datasource (upstream applies it to volume rendering).
+
 The wrapper strips the managed layer's `segments`/`segmentColors` from **its
 own** page hash (they can be thousands of ids and are regenerated on load); the
 hosted viewer's own URL carries them as usual.
@@ -217,4 +222,6 @@ Python tests write tiny real zarr-vectors stores and OME-Zarr parcellations and
 read them back through the same async path the browser uses (over a local,
 range-aware fetch). What CPython cannot cover — JSPI, the wasm32 numpy
 behaviour, the real iframe/viewer — was checked in headless Chromium against a
-Neuroglancer build (see the commit history for the scenario).
+Neuroglancer build of commit 6e7370d1, with a local tiny store and with
+the HCP-1065 demo from GCS (Playwright); that harness is not part of the
+repository.

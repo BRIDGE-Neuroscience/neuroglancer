@@ -321,14 +321,20 @@ export class FilterPanel {
     const label =
       roi.kind === "labels"
         ? `labels ${roi.labels.slice(0, 6).join(", ")}${roi.labels.length > 6 ? "…" : ""}`
-        : (roi.name ?? `ROI ${index + 1} (${roi.annotationId.slice(0, 6)})`);
+        : roi.kind === "shape"
+          ? (roi.name ?? `${roi.shape.type} (not drawn)`)
+          : (roi.name ?? `ROI ${index + 1} (${roi.annotationId.slice(0, 6)})`);
     return h(
       "div",
       { class: "ngpy-roi" },
       h(
         "span",
         { class: "ngpy-roi-kind" },
-        roi.kind === "labels" ? "label" : "shape",
+        roi.kind === "labels"
+          ? "label"
+          : roi.kind === "shape"
+            ? "plane"
+            : "shape",
       ),
       h("span", { class: "ngpy-roi-name" }, label),
       select(OPERATORS, roi.operator, (v) => {

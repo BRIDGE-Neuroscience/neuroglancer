@@ -129,8 +129,9 @@ export class App {
     }
     const viewer = await this.host.ready;
     if (viewer === undefined) {
-      this.statusViewer.textContent =
-        this.host.crossOriginDetected || !this.host.sameOrigin
+      this.statusViewer.textContent = this.host.selfReference
+        ? "Viewer: ?ng= points at this page; pass ?ng=<a Neuroglancer build>"
+        : this.host.crossOriginDetected || !this.host.sameOrigin
           ? "Viewer: cross-origin — write-only (#! hash) control; Filter and scripts cannot read it"
           : "Viewer: not found (is ?ng= a Neuroglancer build?)";
       this.statusViewer.dataset.kind = "error";

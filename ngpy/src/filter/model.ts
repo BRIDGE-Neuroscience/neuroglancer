@@ -72,7 +72,20 @@ export interface LabelRoi {
   name?: string;
 }
 
-export type GroupRoi = AnnotationRoi | LabelRoi;
+/**
+ * A region with no Neuroglancer annotation equivalent (a `halfspace` from a
+ * saved document), kept verbatim in the store's frame so it is neither lost on
+ * import nor dropped on save.  Not drawn in the viewer.
+ */
+export interface ShapeRoi {
+  kind: "shape";
+  shape: RoiShapeJson;
+  operator: RoiOperator;
+  predicate: RoiPredicate;
+  name?: string;
+}
+
+export type GroupRoi = AnnotationRoi | LabelRoi | ShapeRoi;
 
 export interface AttrFilter {
   name: string;
@@ -270,6 +283,8 @@ export class FilterModel {
       let shape: RoiShapeJson | undefined;
       if (roi.kind === "labels") {
         shape = { type: "labelMask", labels: [...roi.labels] };
+      } else if (roi.kind === "shape") {
+        shape = roi.shape;
       } else {
         const ann = annotations.get(roi.annotationId);
         if (ann === undefined) continue;
