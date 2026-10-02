@@ -115,41 +115,65 @@ async def filter_passing_ids(request_json: str) -> str:
 
 
 async def label_info(request_json: str) -> str:
-    """Label list for the label filter: names from segment properties if given,
-    otherwise the distinct labels present in the volume."""
+    """Label list for the label filter, from a parcellation layer's sources.
+
+    ``sources`` are the layer's source URLs: a ``neuroglancer_segment_properties``
+    source supplies names/colours; the first readable volume source is the
+    parcellation that is sampled.  Labels absent from the volume are dropped.
+    """
     import numpy as np
 
     from . import labels
 
     request = json.loads(request_json)
-    out: dict[str, typing.Any] = {"labels": [], "volume": None}
+    out: dict[str, typing.Any] = {
+        "labels": [],
+        "volume": None,
+        "volumeUrl": None,
+        "errors": [],
+    }
     props = None
-    if request.get("propertiesUrl"):
-        try:
-            props = await labels.read_segment_properties(request["propertiesUrl"])
-        except Exception as e:  # noqa: BLE001
-            out["propertiesError"] = str(e)
+    volume_url = None
+    for url in request.get("sources") or []:
+        if props is None and ("|zarr" not in url and not url.startswith("zarr")):
+            try:
+                props = await labels.read_segment_properties(url)
+                continue
+            except Exception:  # noqa: BLE001 - not a properties source
+                pass
+        if volume_url is None:
+            try:
+                labels.parse_volume_source(url)
+                volume_url = url
+            except labels.LabelSourceError as e:
+                out["errors"].append(str(e))
     present = None
-    if request.get("volumeUrl"):
+    if volume_url is not None:
         from .filter import engine
 
         eng = engine()
-        key = f"{request['volumeUrl']}#{request.get('scale')}"
-        volume = eng._volumes.get(key)
-        if volume is None:
-            volume = await labels.open_label_volume(
-                request["volumeUrl"], scale_index=request.get("scale")
-            )
-            eng._volumes[key] = volume
-        out["volume"] = volume.description
-        present = {int(v) for v in np.unique(volume.data) if int(v) != 0}
+        key = f"{volume_url}#{request.get('scale')}"
+        try:
+            volume = eng._volumes.get(key)
+            if volume is None:
+                volume = await labels.open_label_volume(
+                    volume_url, scale_index=request.get("scale")
+                )
+                eng._volumes[key] = volume
+            out["volume"] = volume.description
+            out["volumeUrl"] = volume_url
+            present = {int(v) for v in np.unique(volume.data) if int(v) != 0}
+        except Exception as e:  # noqa: BLE001
+            out["errors"].append(f"{volume_url}: {e}")
     if props is not None:
         for i, name, color in zip(props["ids"], props["names"], props["colors"]):
             if present is not None and int(i) not in present:
                 continue
             out["labels"].append({"id": int(i), "name": name, "color": color})
     elif present is not None:
-        out["labels"] = [{"id": v, "name": str(v), "color": None} for v in sorted(present)]
+        out["labels"] = [
+            {"id": v, "name": str(v), "color": None} for v in sorted(present)
+        ]
     return json.dumps(out)
 
 

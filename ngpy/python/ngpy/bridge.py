@@ -49,14 +49,12 @@ and ``volume()`` / ``volume_info()`` -- those raise ``NotImplementedError``.
 
 from __future__ import annotations
 
-import collections.abc
-import contextlib
 import json
 import typing
 
-from neuroglancer import viewer_base, viewer_state
-from neuroglancer.json_utils import encode_json
-from neuroglancer.trackable_state import ConcurrentModificationError
+# NOTE: no top-level `neuroglancer` import.  The vendored package's
+# `neuroglancer/viewer.py` imports THIS module to define `Viewer`, so this one
+# must be importable first (the worker imports it before anything else).
 
 Emitter = typing.Callable[[str, str], None]
 
@@ -74,6 +72,8 @@ def set_emitter(fn: Emitter | None) -> None:
 
 
 def emit(kind: str, payload: typing.Any) -> None:
+    from neuroglancer.json_utils import encode_json
+
     text = payload if isinstance(payload, str) else encode_json(payload)
     if _emitter is None:
         outbox.append((kind, text))
@@ -93,7 +93,17 @@ _client = _ClientState()
 _active: _BridgeMixin | None = None
 
 
-def active_viewer() -> Viewer | None:
+def __getattr__(name: str):
+    # `ngpy.bridge.Viewer` -- the classes live in the vendored package's
+    # `neuroglancer/viewer.py` (see the note on imports above).
+    if name in ("Viewer", "UnsynchronizedViewer"):
+        from neuroglancer import viewer
+
+        return getattr(viewer, name)
+    raise AttributeError(name)
+
+
+def active_viewer() -> typing.Any:
     """The viewer handle currently attached to the page, if any."""
     return _active  # type: ignore[return-value]
 
@@ -114,6 +124,8 @@ def reset() -> None:
 
 def handle_client_state(message: str) -> str:
     """Apply one state update from the page.  Returns the JSON reply."""
+    from neuroglancer.trackable_state import ConcurrentModificationError
+
     msg = json.loads(message)
     state = msg["s"]
     generation = f"{msg['c']}/{msg['g']}"
@@ -220,42 +232,3 @@ class _BridgeMixin:
 
     def volume(self, *args, **kwargs):  # noqa: ARG002
         raise NotImplementedError("ngpy: volume requests are not supported")
-
-
-class Viewer(_BridgeMixin, viewer_base.ViewerBase):
-    """``neuroglancer.Viewer`` under ngpy: a handle on the page's viewer.
-
-    Creating one attaches it (replacing any earlier handle).  With
-    ``adopt=True`` (default) it starts from the viewer's current state.
-    """
-
-    def __init__(self, token: str = "ngpy", *, adopt: bool = True, **kwargs):
-        viewer_base.ViewerBase.__init__(self, token=token, **kwargs)
-        self._bridge_attach(adopt)
-
-    def __repr__(self) -> str:
-        return f"ngpy.Viewer(token={self.token!r})"
-
-
-class UnsynchronizedViewer(_BridgeMixin, viewer_base.UnsynchronizedViewerBase):
-    """One-way handle: Python's state is pushed, page edits are not read back."""
-
-    def __init__(self, token: str = "ngpy", **kwargs):
-        viewer_base.UnsynchronizedViewerBase.__init__(self, token=token, **kwargs)
-        self._bridge_attach(adopt=False)
-        self._push_unsynchronized()
-
-    def _push_unsynchronized(self) -> None:
-        if self._bridge_is_active():
-            from neuroglancer.random_token import make_random_token
-
-            emit("state", {"k": "s", "s": self.raw_state, "g": make_random_token()})
-
-    def set_state(self, new_state) -> None:  # type: ignore[override]
-        super().set_state(new_state)
-        self._push_unsynchronized()
-
-    @contextlib.contextmanager
-    def txn(self) -> collections.abc.Iterator[viewer_state.ViewerState]:  # type: ignore[override]
-        yield self.state
-        self._push_unsynchronized()
