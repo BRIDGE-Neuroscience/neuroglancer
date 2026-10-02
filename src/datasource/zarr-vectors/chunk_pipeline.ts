@@ -104,6 +104,17 @@ class PositionCache {
   private bytes = 0;
   private sizes = new Map<string, number>();
   constructor(private maxBytes: number) {}
+
+  /** The cached entry, if any, without loading. */
+  peek(key: string): Promise<Float32Array | undefined> | undefined {
+    return this.entries.get(key);
+  }
+
+  /** Records positions already decoded elsewhere. */
+  put(key: string, positions: Float32Array) {
+    if (this.entries.has(key)) return;
+    this.get(key, () => Promise.resolve(positions));
+  }
   get(key: string, load: () => Promise<Float32Array | undefined>) {
     let entry = this.entries.get(key);
     if (entry !== undefined) {
@@ -136,6 +147,13 @@ class PositionCache {
 }
 
 const positionCache = new PositionCache(256 * 1024 * 1024);
+
+/** Rows this close together are read together (12 bytes each for float32). */
+const RANGE_GAP_VERTICES = 1024;
+/** More reads than this into one neighbour, and the whole cell is fetched. */
+const MAX_RANGE_READS = 4;
+/** Loads shared between requests must not be cancelled by any one of them. */
+const SHARED_SIGNAL = new AbortController().signal;
 
 /**
  * Maps each fragment of each chunk to the row of the object that owns it, by
@@ -322,6 +340,10 @@ export class LevelPipeline {
       linksPromise,
     ]);
     if (decoded === undefined) return undefined;
+    // Neighbours' bridges into this chunk can now be resolved without a read.
+    // `decoded.positions` is not transferred (the chunk's arrays are rebuilt
+    // below), so it is safe to keep.
+    positionCache.put(`${level.path}|${chunkKey}`, decoded.positions);
 
     // Global ids for stores without per-fragment segment ids.
     let segmentIds =
@@ -410,59 +432,80 @@ export class LevelPipeline {
       const vertices = [...new Set(indices.map((i) => ghosts[i].vertex))].sort(
         (x, y) => x - y,
       );
-      // Coalesce rows within 64 vertices of each other into one read.
-      const spans: [number, number][] = [];
-      for (const v of vertices) {
-        const last = spans[spans.length - 1];
-        if (last !== undefined && v - last[1] <= 64) last[1] = v;
-        else spans.push([v, v]);
-      }
       const found = new Map<number, Float32Array>();
-      let rangeable = true;
-      for (const [first, last] of spans) {
-        const bytes = await this.cells.readCellRange(
-          "vertices",
-          key,
-          first * vertexBytes,
-          (last - first + 1) * vertexBytes,
-          signal,
-        );
-        if (bytes === null) {
-          rangeable = false;
-          break;
+      const cacheKey = `${this.options.level.path}|${key}`;
+      const fromWhole = (all: Float32Array | undefined) => {
+        if (all === undefined) return;
+        for (const v of vertices) {
+          if ((v + 1) * rank <= all.length) {
+            found.set(v, all.subarray(v * rank, (v + 1) * rank));
+          }
         }
-        if (bytes === undefined) continue;
-        const values = decodeAttributeToFloat32(
-          bytes,
-          dtype,
-          (last - first + 1) * rank,
-        );
-        for (let v = first; v <= last; ++v) {
-          found.set(
-            v,
-            values.subarray((v - first) * rank, (v - first + 1) * rank),
+      };
+      const cached = positionCache.peek(cacheKey);
+      if (cached !== undefined) {
+        fromWhole(await cached.catch(() => undefined));
+      } else {
+        // Coalesce rows into few reads; past a handful, read the whole cell
+        // once (and keep it for the other chunks bridging into it).
+        const spans: [number, number][] = [];
+        for (const v of vertices) {
+          const last = spans[spans.length - 1];
+          if (last !== undefined && v - last[1] <= RANGE_GAP_VERTICES) {
+            last[1] = v;
+          } else {
+            spans.push([v, v]);
+          }
+        }
+        let rangeable = spans.length <= MAX_RANGE_READS;
+        if (rangeable) {
+          const reads = await Promise.all(
+            spans.map(([first, last]) =>
+              this.cells.readCellRange(
+                "vertices",
+                key,
+                first * vertexBytes,
+                (last - first + 1) * vertexBytes,
+                signal,
+              ),
+            ),
           );
-        }
-      }
-      if (!rangeable) {
-        const all = await positionCache.get(
-          `${this.options.level.path}|${key}`,
-          async () => {
-            const bytes = await this.cells.readCell("vertices", key, signal);
-            if (bytes === undefined) return undefined;
-            return decodeAttributeToFloat32(
+          spans.forEach(([first, last], s) => {
+            const bytes = reads[s];
+            if (bytes === null) {
+              rangeable = false;
+              return;
+            }
+            if (bytes === undefined) return;
+            const values = decodeAttributeToFloat32(
               bytes,
               dtype,
-              bytes.byteLength / elementBytes,
+              (last - first + 1) * rank,
             );
-          },
-        );
-        if (all !== undefined) {
-          for (const v of vertices) {
-            if ((v + 1) * rank <= all.length) {
-              found.set(v, all.subarray(v * rank, (v + 1) * rank));
+            for (let v = first; v <= last; ++v) {
+              found.set(
+                v,
+                values.subarray((v - first) * rank, (v - first + 1) * rank),
+              );
             }
-          }
+          });
+        }
+        if (!rangeable) {
+          fromWhole(
+            await positionCache.get(cacheKey, async () => {
+              const bytes = await this.cells.readCell(
+                "vertices",
+                key,
+                SHARED_SIGNAL,
+              );
+              if (bytes === undefined) return undefined;
+              return decodeAttributeToFloat32(
+                bytes,
+                dtype,
+                bytes.byteLength / elementBytes,
+              );
+            }),
+          );
         }
       }
       for (const i of indices) {

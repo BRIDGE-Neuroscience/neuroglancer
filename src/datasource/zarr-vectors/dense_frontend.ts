@@ -158,10 +158,12 @@ const POSITION_FORMAT = computeTextureFormat(
   DataType.FLOAT32,
   3,
 );
+// Segment ids are uploaded as two uint32 words per vertex, low word first,
+// which is the layout of a UINT64 texel.
 const SEGMENT_FORMAT = computeTextureFormat(
   new TextureFormat(),
-  DataType.UINT32,
-  2,
+  DataType.UINT64,
+  1,
 );
 
 export class ZarrVectorsDenseChunk extends SliceViewChunk {
@@ -468,12 +470,13 @@ class DenseRenderHelper extends RefCounted {
         3,
       ),
     );
+    builder.addVertexCode(glsl_uint64);
     builder.addVertexCode(
       this.textureAccess.getAccessor(
         "readSegment",
         "uSegments",
-        DataType.UINT32,
-        2,
+        DataType.UINT64,
+        1,
       ),
     );
     this.attributes.forEach((a, i) => {
@@ -504,7 +507,7 @@ highp vec3 vertexB = readPosition(aVertexIndex.y);
 emitLine(uProjection, vertexA, vertexB, uLineWidth);
 highp uint endpoint = getLineEndpointIndex();
 highp uint vertexIndex = aVertexIndex.x * (1u - endpoint) + aVertexIndex.y * endpoint;
-vSegment = readSegment(aVertexIndex.x);
+vSegment = readSegment(aVertexIndex.x).value;
 vPickID = uPickID + aVertexIndex.x;
 `;
     } else {
@@ -513,7 +516,7 @@ vPickID = uPickID + aVertexIndex.x;
       vertexMain = `
 highp uint vertexIndex = uint(gl_InstanceID);
 emitCircle(uProjection * vec4(readPosition(vertexIndex), 1.0), uNodeDiameter, 0.0);
-vSegment = readSegment(vertexIndex);
+vSegment = readSegment(vertexIndex).value;
 vPickID = uPickID + vertexIndex;
 `;
     }
@@ -581,7 +584,10 @@ void emitDefault() {
     builder.addFragmentCode(glsl_COLORMAPS);
     addControlsToBuilder(state, builder);
     // String controls (newer Neuroglancer) need the string helpers.
-    const glslString = (shaderLib as Record<string, unknown>).glsl_string;
+    // Looked up at run time so the bundler does not flag older trees.
+    const glslString = (shaderLib as Record<string, unknown>)[
+      ["glsl", "string"].join("_")
+    ];
     if (typeof glslString === "string") builder.addFragmentCode(glslString);
     builder.addFragmentCode(`
 void zvUserMain();
