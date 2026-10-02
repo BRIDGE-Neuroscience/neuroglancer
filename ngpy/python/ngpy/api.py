@@ -58,8 +58,12 @@ def boot(info_json: str) -> str:
     import neuroglancer  # noqa: F401  (vendored upstream subset + ngpy shims)
     import zarr_vectors
 
+    from .compat import install_wasm32_numpy_shims
+
+    shims = install_wasm32_numpy_shims()
     return json.dumps(
         {
+            "wasm32_shims": shims,
             "python": sys.version.split()[0],
             "zarr_vectors": getattr(zarr_vectors, "__version__", "?"),
             "numpy": __import__("numpy").__version__,

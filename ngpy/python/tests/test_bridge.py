@@ -160,6 +160,25 @@ def test_unsupported_features_fail_loudly():
         viewer.volume("x")
 
 
+def test_the_viewers_new_layer_placeholder_is_not_passed_to_python():
+    # A Neuroglancer page with no state opens with this placeholder layer,
+    # which upstream's make_layer rejects (ValueError on every txn).
+    _client(
+        {
+            "layers": [{"type": "new", "source": "", "tab": "source", "name": "new layer"}],
+            "selectedLayer": {"visible": True, "layer": "new layer"},
+            "layout": "4panel-alt",
+        },
+        1,
+        "",
+    )
+    viewer = neuroglancer.Viewer()
+    with viewer.txn() as s:
+        s.layers["img"] = neuroglancer.ImageLayer(source="precomputed://img")
+    assert [layer.name for layer in viewer.state.layers] == ["img"]
+    assert viewer.state.selected_layer.layer is None
+
+
 def test_unknown_state_keys_survive_the_round_trip():
     # A fork-specific key (e.g. a zarr-vectors layer option) must not be lost
     # when Python edits an unrelated part of the state.

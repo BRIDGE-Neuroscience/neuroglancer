@@ -122,12 +122,35 @@ def reset() -> None:
     outbox.clear()
 
 
+def sanitize_client_state(state: typing.Any) -> typing.Any:
+    """Drop the viewer's transient ``{"type": "new"}`` placeholder layers.
+
+    A Neuroglancer page with no state opens an "add layer" dialog backed by a
+    layer of type ``new`` (empty source).  Upstream's Python ``make_layer``
+    raises on that type, which would break every ``txn()``; it is a UI
+    placeholder, not data, so it is not passed to Python.
+    """
+    if not isinstance(state, dict):
+        return state
+    layers = state.get("layers")
+    if isinstance(layers, list) and any(
+        isinstance(layer, dict) and layer.get("type") == "new" for layer in layers
+    ):
+        kept = [l for l in layers if not (isinstance(l, dict) and l.get("type") == "new")]
+        dropped = {l.get("name") for l in layers if isinstance(l, dict) and l.get("type") == "new"}
+        state = dict(state, layers=kept)
+        selected = state.get("selectedLayer")
+        if isinstance(selected, dict) and selected.get("layer") in dropped:
+            state["selectedLayer"] = {k: v for k, v in selected.items() if k != "layer"}
+    return state
+
+
 def handle_client_state(message: str) -> str:
     """Apply one state update from the page.  Returns the JSON reply."""
     from neuroglancer.trackable_state import ConcurrentModificationError
 
     msg = json.loads(message)
-    state = msg["s"]
+    state = sanitize_client_state(msg["s"])
     generation = f"{msg['c']}/{msg['g']}"
     previous = msg.get("pg") or None
     viewer = _active
