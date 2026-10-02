@@ -143,11 +143,14 @@ function setShaderControls(
   parseResult: ShaderControlsParseResult,
 ) {
   const set = setControlsInShader as (...args: unknown[]) => void;
+  const result = parseResult as ShaderControlsParseResult & {
+    preprocessing?: unknown;
+  };
   set(
     gl,
     shader,
     state,
-    "preprocessing" in parseResult ? parseResult : parseResult.controls,
+    result.preprocessing !== undefined ? result : result.controls,
   );
 }
 

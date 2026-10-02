@@ -29,14 +29,32 @@
 import type { ProjectionParameters } from "#src/projection_parameters.js";
 import type { TransformedSource } from "#src/sliceview/base.js";
 import { forEachVisibleVolumetricChunk } from "#src/sliceview/base.js";
-import {
-  getViewFrustrumVolume,
-  mat3,
-  mat3FromMat4,
-  prod3,
-} from "#src/util/geom.js";
+import type { mat4 } from "#src/util/geom.js";
+import { mat3, mat3FromMat4, prod3 } from "#src/util/geom.js";
 
 const tempMat3 = mat3.create();
+
+/**
+ * Volume of a view's frustum.  Kept here rather than imported because its
+ * name differs between Neuroglancer versions (`getViewFrustrumVolume`, later
+ * `getViewFrustumVolume`).
+ */
+function viewFrustumVolume(projectionMat: mat4) {
+  if (projectionMat[15] === 1) {
+    // Orthographic.
+    return (
+      (2 / Math.abs(projectionMat[10])) *
+      (2 / Math.abs(projectionMat[0])) *
+      (2 / Math.abs(projectionMat[5]))
+    );
+  }
+  const a = projectionMat[10];
+  const b = projectionMat[14];
+  const near = (2 * b) / (2 * a - 2);
+  const far = ((a - 1) * near) / (a + 1);
+  const baseArea = 4 / (projectionMat[0] * projectionMat[5]);
+  return (baseArea / 3) * (Math.abs(far) ** 3 - Math.abs(near) ** 3);
+}
 
 /**
  * Index (0 = finest) of the level to draw for this view.  `densities` are
@@ -64,7 +82,7 @@ export function selectDenseLevel(
     mat3.determinant(mat3FromMat4(tempMat3, viewMatrix)),
   );
   const frustumVolume =
-    (getViewFrustrumVolume(projectionMat) / viewDet) * canonicalToPhysical;
+    (viewFrustumVolume(projectionMat) / viewDet) * canonicalToPhysical;
   const base = transformedSources[0];
   let sourceVolume =
     Math.abs(base.chunkLayout.detTransform) * canonicalToPhysical;
