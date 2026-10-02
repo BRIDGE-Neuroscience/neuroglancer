@@ -61,10 +61,6 @@ properties:
     type: boolean
     title: "Indicates whether to hide the background of cross-section views in the 3-d view of `~DataPanelLayoutType.4panel` and `~DataPanelLayoutType.4panel-alt` layouts."
     default: false
-  showCrossSectionOutline3D:
-    type: boolean
-    title: "Indicates whether to outline the border of cross-section views in the 3-d view of `~DataPanelLayoutType.4panel` and `~DataPanelLayoutType.4panel-alt` layouts.  Most useful combined with hiding the cross-section background, which otherwise leaves the section's position unmarked."
-    default: false
   gpuMemoryLimit:
     type: integer
     title: "GPU memory limit, in bytes."

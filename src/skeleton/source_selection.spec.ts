@@ -17,45 +17,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  getSpatiallyIndexedSkeletonPartitionsObjects,
   selectSpatiallyIndexedSkeletonEntriesByGrid,
   selectSpatiallyIndexedSkeletonEntriesByGridWithFallback,
   selectSpatiallyIndexedSkeletonEntriesForViewWithFallback,
 } from "#src/skeleton/source_selection.js";
 
 describe("skeleton/source_selection", () => {
-  it("reports the object partition from a source, an entry, or a tsource", () => {
-    const partitioned = { parameters: { partitionsObjects: true } };
-    const plain = { parameters: { partitionsObjects: false } };
-    expect(getSpatiallyIndexedSkeletonPartitionsObjects(partitioned)).toBe(
-      true,
-    );
-    expect(getSpatiallyIndexedSkeletonPartitionsObjects(plain)).toBe(false);
-    // The same three shapes the grid-index accessor unwraps.
-    expect(
-      getSpatiallyIndexedSkeletonPartitionsObjects({
-        chunkSource: partitioned,
-      }),
-    ).toBe(true);
-    expect(
-      getSpatiallyIndexedSkeletonPartitionsObjects({ source: partitioned }),
-    ).toBe(true);
-  });
-
-  it("treats an undeclared partition as absent", () => {
-    // A resolution pyramid (mesh, point cloud) declares nothing, and must not
-    // be drawn as a union of levels.
-    expect(getSpatiallyIndexedSkeletonPartitionsObjects({})).toBe(false);
-    expect(
-      getSpatiallyIndexedSkeletonPartitionsObjects({ parameters: {} }),
-    ).toBe(false);
-    expect(
-      getSpatiallyIndexedSkeletonPartitionsObjects({
-        parameters: { partitionsObjects: 1 },
-      }),
-    ).toBe(false);
-  });
-
   it("returns the exact grid match when available", () => {
     const entries = [
       { id: "coarse", gridIndex: 0 },

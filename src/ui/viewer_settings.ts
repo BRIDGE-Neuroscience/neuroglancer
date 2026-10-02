@@ -122,7 +122,6 @@ export class ViewerSettingsPanel extends SidePanel {
       "Hide sections background 3-d",
       viewer.hideCrossSectionBackground3D,
     );
-    addCheckbox("Show section outlines 3-d", viewer.showCrossSectionOutline3D);
     addCheckbox("Show default annotations", viewer.showDefaultAnnotations);
     addCheckbox(
       "Show chunk statistics",

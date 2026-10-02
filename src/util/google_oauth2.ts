@@ -38,40 +38,6 @@ export const OPENID_SCOPE = "openid";
 export const AUTH_SERVER = "https://accounts.google.com/o/oauth2/v2/auth";
 
 /**
- * Prefix of the BroadcastChannel over which the redirect page also delivers
- * the OAuth2 response.
- *
- * When the initiating document is cross-origin isolated, `COOP: same-origin`
- * places the popup in a separate browsing context group: the popup's
- * `window.opener` is null, so it cannot `postMessage` the response back.
- * BroadcastChannel is same-origin by construction but crosses browsing context
- * groups, so it still reaches the initiating window.
- *
- * Keep in sync with `google_oauth2_redirect.html`, which cannot import this.
- */
-export const AUTH_RESPONSE_CHANNEL_PREFIX = "neuroglancer-oauth2-";
-
-/**
- * The channel for one authentication attempt.
- *
- * Scoped by the attempt's random `state` rather than being a single well-known
- * name, because a BroadcastChannel is readable by ANY same-origin context and
- * the payload is a bearer token.  A listener must know the channel name up
- * front — there is no enumeration API — so deriving it from a value that only
- * the initiating window and the redirect page possess keeps the token away
- * from unrelated same-origin code.  That matters most in the Pyodide build,
- * where user-supplied Python runs in the same origin with `js` access.
- */
-export function authResponseChannelName(state: string): string {
-  return AUTH_RESPONSE_CHANNEL_PREFIX + state;
-}
-
-/** Whether the document is cross-origin isolated, safe where the global is absent. */
-function isCrossOriginIsolated(): boolean {
-  return globalThis.crossOriginIsolated === true;
-}
-
-/**
  * OAuth2 Token
  */
 export interface OAuth2Token {
@@ -95,99 +61,56 @@ function extractEmailFromIdToken(idToken: string): string {
   }
 }
 
-/**
- * Parses an OAuth2 response, or returns `undefined` if it does not belong to
- * the attempt identified by `state`.
- *
- * A mismatched state is ignored rather than treated as an error: the response
- * is simply not ours (a stale broadcast from an earlier attempt, or another
- * tab's login), and rejecting on it would let an unrelated message abort a
- * legitimate flow.  Only a matching state is ever accepted, so this remains
- * the CSRF check.
- */
-// Exported for testing.
-export function parseAuthResponse(
-  data: unknown,
-  state: string,
-): OAuth2Token | undefined {
-  // Everything before the state match must be non-throwing: an unrelated
-  // same-origin message (an array, a bare object, another library's postMessage)
-  // must be ignored, not turned into a rejection that kills a live sign-in.
-  if (typeof data !== "object" || data === null || Array.isArray(data)) {
-    return undefined;
-  }
-  const obj = data as Record<string, unknown>;
-  if (typeof obj.state !== "string" || obj.state !== state) return undefined;
-  // Past this point the response IS ours, so a malformed one is a real error.
-  verifyObject(obj);
-  const idToken = verifyObjectProperty(obj, "id_token", verifyString);
-  return {
-    accessToken: verifyObjectProperty(obj, "access_token", verifyString),
-    tokenType: verifyObjectProperty(obj, "token_type", verifyString),
-    expiresIn: verifyObjectProperty(obj, "expires_in", verifyString),
-    scope: verifyObjectProperty(obj, "scope", verifyString),
-    email: extractEmailFromIdToken(idToken),
-  };
-}
-
 // Note: `signal` is guaranteed to be aborted once the operation completes.
-//
-// Listens on both delivery transports.  `source` is undefined when the popup
-// handle has been severed by COOP, in which case only the broadcast can arrive
-// and `state` alone ties the response to this attempt.
-// Exported for testing.
-export function waitForAuthResponseMessage(
-  source: Window | undefined,
+function waitForAuthResponseMessage(
+  source: Window,
   state: string,
   signal: AbortSignal,
 ): Promise<OAuth2Token> {
   return new Promise((resolve, reject) => {
-    const handleResponse = (data: unknown) => {
-      let token: OAuth2Token | undefined;
-      try {
-        token = parseAuthResponse(data, state);
-      } catch (parseError) {
-        reject(
-          new Error(
-            `Received unexpected authentication response: ${parseError.message}`,
-          ),
-        );
-        console.error("Response received: ", data);
-        return;
-      }
-      if (token !== undefined) {
-        resolve(token);
-      }
-    };
-
     window.addEventListener(
       "message",
       (event: MessageEvent) => {
         if (event.origin !== location.origin) {
           return;
         }
-        if (source !== undefined && event.source !== source) return;
-        handleResponse(event.data);
+
+        if (event.source !== source) return;
+
+        try {
+          const obj = verifyObject(event.data);
+          const receivedState = verifyObjectProperty(
+            obj,
+            "state",
+            verifyString,
+          );
+          if (receivedState !== state) {
+            throw new Error("invalid state");
+          }
+          const idToken = verifyObjectProperty(obj, "id_token", verifyString);
+          const token: OAuth2Token = {
+            accessToken: verifyObjectProperty(
+              obj,
+              "access_token",
+              verifyString,
+            ),
+            tokenType: verifyObjectProperty(obj, "token_type", verifyString),
+            expiresIn: verifyObjectProperty(obj, "expires_in", verifyString),
+            scope: verifyObjectProperty(obj, "scope", verifyString),
+            email: extractEmailFromIdToken(idToken),
+          };
+          resolve(token);
+        } catch (parseError) {
+          reject(
+            new Error(
+              `Received unexpected authentication response: ${parseError.message}`,
+            ),
+          );
+          console.error("Response received: ", event.data);
+        }
       },
       { signal: signal },
     );
-
-    if (signal.aborted) {
-      // Nothing can arrive, so settle rather than leaving the caller waiting on
-      // a promise that never resolves.
-      reject(signal.reason);
-      return;
-    }
-    // BroadcastChannel only ever delivers same-origin messages, so unlike the
-    // `message` path there is no origin to check here.  The channel name is
-    // derived from `state`, so only this attempt's participants know it.
-    const channel = new BroadcastChannel(authResponseChannelName(state));
-    channel.addEventListener(
-      "message",
-      (event: MessageEvent) => handleResponse(event.data),
-      { signal: signal },
-    );
-    signal.addEventListener("abort", () => channel.close(), { once: true });
   });
 }
 
@@ -201,11 +124,6 @@ function makeAuthRequestUrl(options: {
   authUser?: number;
   includeGrantedScopes?: boolean;
   immediate?: boolean;
-  /**
-   * `select_account` shows the account chooser even when Google already has a
-   * session, which is the only way a signed-in user can switch identity.
-   */
-  prompt?: "select_account" | "consent";
 }) {
   let url = `${AUTH_SERVER}?client_id=${encodeURIComponent(options.clientId)}`;
   const redirectUri = new URL("./google_oauth2_redirect.html", import.meta.url)
@@ -235,9 +153,6 @@ function makeAuthRequestUrl(options: {
   }
   if (options.authUser !== undefined) {
     url += `&authuser=${options.authUser}`;
-  }
-  if (options.prompt !== undefined) {
-    url += `&prompt=${encodeURIComponent(options.prompt)}`;
   }
   return url;
 }
@@ -278,7 +193,6 @@ export async function authenticateGoogleOAuth2(
     loginHint?: string;
     immediate?: boolean;
     authUser?: number;
-    prompt?: "select_account" | "consent";
   },
   signal: AbortSignal,
 ) {
@@ -293,40 +207,20 @@ export async function authenticateGoogleOAuth2(
     loginHint: options.loginHint,
     immediate: options.immediate,
     authUser: options.authUser,
-    prompt: options.prompt,
   });
   const abortController = new AbortController();
   signal = AbortSignal.any([abortController.signal, signal]);
   try {
-    let source: Window | undefined;
+    let source: Window;
     if (options.immediate) {
-      if (!immediateAuthSupported()) {
-        throw new Error(
-          "Silent authentication is unavailable in a cross-origin isolated context",
-        );
-      }
       source = createAuthIframe(url, abortController);
     } else {
       const newWindow = open(url);
       if (newWindow === null) {
         throw new Error("Failed to create authentication popup window");
       }
-      if (isCrossOriginIsolated()) {
-        // The popup handle has been severed by `COOP: same-origin`.  It cannot
-        // be monitored: `closed` reads true within a few hundred milliseconds
-        // of the popup navigating to the auth server, while the popup is still
-        // very much open, so `monitorAuthPopupWindow` would abort the flow
-        // while the user is still logging in.  Leave `source` undefined; the
-        // response arrives over the broadcast channel instead.
-        //
-        // Nothing here can close the popup either — `close()` on a severed
-        // handle is a silent no-op, not a throw — so the redirect page closes
-        // itself once it has delivered the response.
-        source = undefined;
-      } else {
-        monitorAuthPopupWindow(newWindow, abortController);
-        source = newWindow;
-      }
+      monitorAuthPopupWindow(newWindow, abortController);
+      source = newWindow!;
     }
     return await raceWithAbort(
       waitForAuthResponseMessage(source, state, abortController.signal),
@@ -335,15 +229,6 @@ export async function authenticateGoogleOAuth2(
   } finally {
     abortController.abort();
   }
-}
-
-/**
- * Whether the hidden-iframe "immediate" (silent re-authentication) mode can
- * work.  `COEP: require-corp` blocks the cross-origin auth iframe outright, so
- * in a cross-origin isolated context a token can only be obtained via a popup.
- */
-export function immediateAuthSupported(): boolean {
-  return !isCrossOriginIsolated();
 }
 
 export class GoogleOAuth2CredentialsProvider extends CredentialsProvider<OAuth2Token> {
@@ -360,7 +245,7 @@ export class GoogleOAuth2CredentialsProvider extends CredentialsProvider<OAuth2T
     return await getCredentialsWithStatus(
       {
         description: this.options.description,
-        supportsImmediate: immediateAuthSupported(),
+        supportsImmediate: true,
         get: (signal, immediate) =>
           authenticateGoogleOAuth2(
             {

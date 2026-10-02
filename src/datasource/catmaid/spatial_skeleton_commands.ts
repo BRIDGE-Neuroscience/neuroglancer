@@ -66,6 +66,7 @@ import type {
   SpatialSkeletonCommand,
   SpatialSkeletonCommandContext,
 } from "#src/skeleton/command_history.js";
+import type { SpatiallyIndexedSkeletonLayer } from "#src/skeleton/frontend.js";
 import {
   findSpatiallyIndexedSkeletonNode,
   getSpatiallyIndexedSkeletonDirectChildren,
@@ -73,7 +74,6 @@ import {
   getSpatiallyIndexedSkeletonPathToRoot,
   getSpatiallyIndexedSkeletonSubtreeNodes,
 } from "#src/skeleton/node_traversal.js";
-import type { SpatiallyIndexedSkeletonLayer } from "#src/skeleton/spatial_frontend.js";
 import { getEditableSpatiallyIndexedSkeletonSource } from "#src/skeleton/spatial_skeleton_manager.js";
 import { StatusMessage } from "#src/status.js";
 import { formatErrorMessage } from "#src/util/error.js";

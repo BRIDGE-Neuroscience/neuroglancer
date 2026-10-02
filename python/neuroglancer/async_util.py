@@ -16,82 +16,71 @@ import asyncio
 import concurrent.futures
 import threading
 
-
-def _is_pyodide() -> bool:
-    try:
-        import js  # type: ignore[import]  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
+import tornado.platform.asyncio
 
 
-_PYODIDE = _is_pyodide()
+class BackgroundTornadoServerMetaclass(type):
+    def __call__(cls, *args, **kwargs):
+        obj = type.__call__(cls, *args, **kwargs)
+        obj.__post_init__()
+        return obj
 
-if not _PYODIDE:
-    import tornado.platform.asyncio
 
-    class BackgroundTornadoServerMetaclass(type):
-        def __call__(cls, *args, **kwargs):
-            obj = type.__call__(cls, *args, **kwargs)
-            obj.__post_init__()
-            return obj
+class BackgroundTornadoServer(metaclass=BackgroundTornadoServerMetaclass):
+    def __init__(self, daemon=False):
+        self._thread = threading.Thread(target=self._run_server)
+        if daemon:
+            self._thread.daemon = True
+        self._started = concurrent.futures.Future()
+        self._stop_lock = threading.Lock()
+        self._stop_requested = False
 
-    class BackgroundTornadoServer(metaclass=BackgroundTornadoServerMetaclass):
-        def __init__(self, daemon=False):
-            self._thread = threading.Thread(target=self._run_server)
-            if daemon:
-                self._thread.daemon = True
-            self._started = concurrent.futures.Future()
-            self._stop_lock = threading.Lock()
-            self._stop_requested = False
-
-        def __post_init__(self):
-            self._thread.start()
-            try:
-                self._started.result()
-            except:
-                self._thread.join()
-                raise
-
-        def _run_server(self):
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                tornado.platform.asyncio.AsyncIOMainLoop()
-                self.loop = loop
-                loop.call_soon(self._start_server)
-                loop.run_forever()
-                loop.close()
-            except Exception as exc:
-                self._started.set_exception(exc)
-
-        def _attempt_to_start_server(self):
-            raise NotImplementedError
-
-        def _start_server(self):
-            try:
-                self._attempt_to_start_server()
-                self._started.set_result(None)
-            except Exception as e:
-                self.loop.stop()
-                self._started.set_exception(e)
-
-        def request_stop(self):
-            with self._stop_lock:
-                if not self._stop_requested:
-                    self._stop_requested = True
-                    self.loop.call_soon_threadsafe(
-                        lambda: asyncio.create_task(self._stop())
-                    )
-
-        def stop(self):
-            self.request_stop()
+    def __post_init__(self):
+        self._thread.start()
+        try:
+            self._started.result()
+        except:
             self._thread.join()
+            raise
 
-        async def _stop(self):
-            self.http_server.stop()
-            await tornado.platform.asyncio.to_asyncio_future(
-                self.http_server.close_all_connections()
-            )
+    def _run_server(self):
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            tornado.platform.asyncio.AsyncIOMainLoop()
+            self.loop = loop
+            loop.call_soon(self._start_server)
+            loop.run_forever()
+            loop.close()
+        except Exception as exc:
+            self._started.set_exception(exc)
+
+    def _attempt_to_start_server(self):
+        raise NotImplementedError
+
+    def _start_server(self):
+        try:
+            self._attempt_to_start_server()
+            self._started.set_result(None)
+        except Exception as e:
             self.loop.stop()
+            self._started.set_exception(e)
+
+    def request_stop(self):
+        with self._stop_lock:
+            if not self._stop_requested:
+                self._stop_requested = True
+                self.loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._stop())
+                )
+
+    def stop(self):
+        self.request_stop()
+        self._thread.join()
+
+    async def _stop(self):
+        self.http_server.stop()
+        await tornado.platform.asyncio.to_asyncio_future(
+            self.http_server.close_all_connections()
+        )
+        self.loop.stop()

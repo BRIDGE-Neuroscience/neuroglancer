@@ -13,152 +13,111 @@
 # limitations under the License.
 
 
-try:
-    import js as _js  # type: ignore[import]  # noqa: F401
-
-    _PYODIDE = True
-except ImportError:
-    _PYODIDE = False
-
-from . import (
+from . import (  # noqa: I001
     segment_colors,  # noqa: F401
+    server,  # noqa: F401
     skeleton,  # noqa: F401
 )
+from .default_credentials_manager import set_boss_token  # noqa: F401
 from .equivalence_map import EquivalenceMap  # noqa: F401
 from .local_volume import LocalVolume  # noqa: F401
+from .screenshot import ScreenshotSaver  # noqa: F401
+from .server import (
+    is_server_running,  # noqa: F401
+    set_server_bind_address,  # noqa: F401
+    set_static_content_source,  # noqa: F401
+    set_dev_server_content_source,  # noqa: F401
+    stop,  # noqa: F401
+)
 from .url_state import parse_url, to_json_dump, to_url  # noqa: F401
-
-if _PYODIDE:
-    from .viewer_pyodide import (
-        PyodideUnsynchronizedViewer as UnsynchronizedViewer,
-    )
-    from .viewer_pyodide import (  # noqa: F401
-        PyodideViewer as Viewer,
-    )
-
-    def is_server_running() -> bool:  # noqa: F811
-        return True
-
-    def set_server_bind_address(*args, **kwargs):  # noqa: F811
-        pass
-
-    def set_static_content_source(*args, **kwargs):  # noqa: F811
-        pass
-
-    def set_dev_server_content_source(*args, **kwargs):  # noqa: F811
-        pass
-
-    def stop():  # noqa: F811
-        pass
-
-else:
-    from . import server  # noqa: F401
-    from .default_credentials_manager import set_boss_token  # noqa: F401
-    from .screenshot import ScreenshotSaver  # noqa: F401
-    from .server import (
-        is_server_running,  # noqa: F401
-        set_dev_server_content_source,  # noqa: F401
-        set_server_bind_address,  # noqa: F401
-        set_static_content_source,  # noqa: F401
-        stop,  # noqa: F401
-    )
-
-    # Deliberate: `Viewer` is whichever implementation suits the runtime. mypy
-    # checks both branches, sees the pyodide names bound first, and reports the
-    # rebinding here as an incompatible assignment -- which is precisely what
-    # it is, and what is wanted. The two are interchangeable through the public
-    # API rather than by subtyping.
-    from .viewer import (  # type: ignore[assignment]  # noqa: F401
-        UnsynchronizedViewer,
-        Viewer,
-    )
+from .viewer import UnsynchronizedViewer, Viewer  # noqa: F401
 from .viewer_config_state import (
     PrefetchState,  # noqa: F401
     ScaleBarOptions,  # noqa: F401
 )
 from .viewer_state import (
-    Annotation,  # noqa: F401
-    AnnotationLayer,  # noqa: F401
-    AnnotationPropertySpec,  # noqa: F401
-    AxisAlignedBoundingBoxAnnotation,  # noqa: F401
-    BaseSegmentColoringTool,  # noqa: F401
-    BlendTool,  # noqa: F401
-    ColorSeedTool,  # noqa: F401
-    CoordinateArray,  # noqa: F401
-    CoordinateSpace,  # noqa: F401
-    CoordinateSpaceTransform,  # noqa: F401
-    CrossSection,  # noqa: F401
-    CrossSectionMap,  # noqa: F401
-    CrossSectionRenderScaleTool,  # noqa: F401
-    DataPanelLayout,  # noqa: F401
-    DimensionPlaybackVelocity,  # noqa: F401
-    DimensionScale,  # noqa: F401
-    DimensionTool,  # noqa: F401
-    EllipsoidAnnotation,  # noqa: F401
-    HelpPanelState,  # noqa: F401
-    HideSegmentZeroTool,  # noqa: F401
-    HoverHighlightTool,  # noqa: F401
-    IgnoreNullVisibleSetTool,  # noqa: F401
-    ImageLayer,  # noqa: F401
-    InvlerpParameters,  # noqa: F401
-    Layer,  # noqa: F401
-    LayerDataSource,  # noqa: F401
-    LayerDataSources,  # noqa: F401
-    LayerDataSubsource,  # noqa: F401
-    LayerGroupViewer,  # noqa: F401
-    LayerListPanelState,  # noqa: F401
-    Layers,  # noqa: F401
+    SegmentIdMapEntry,  # noqa: F401
     LayerSelectedValues,  # noqa: F401
     LayerSelectionState,  # noqa: F401
-    LayerSidePanelState,  # noqa: F401
-    LineAnnotation,  # noqa: F401
-    LinkedDepthRange,  # noqa: F401
-    LinkedOrientationState,  # noqa: F401
-    LinkedPosition,  # noqa: F401
-    LinkedZoomFactor,  # noqa: F401
-    LocalAnnotationLayer,  # noqa: F401
-    ManagedLayer,  # noqa: F401
-    MergeSegmentsTool,  # noqa: F401
-    MeshRenderScaleTool,  # noqa: F401
-    MeshSilhouetteRenderingTool,  # noqa: F401
-    NotSelectedAlphaTool,  # noqa: F401
-    ObjectAlphaTool,  # noqa: F401
-    OpacityTool,  # noqa: F401
+    CoordinateSpace,  # noqa: F401
+    DimensionScale,  # noqa: F401
+    CoordinateArray,  # noqa: F401
+    Tool,  # noqa: F401
+    PlacePointTool,  # noqa: F401
+    PlaceLineTool,  # noqa: F401
     PlaceBoundingBoxTool,  # noqa: F401
     PlaceEllipsoidTool,  # noqa: F401
-    PlaceLineTool,  # noqa: F401
-    PlacePointTool,  # noqa: F401
     PlacePolylineTool,  # noqa: F401
-    PointAnnotation,  # noqa: F401
-    PointAnnotationLayer,  # noqa: F401
-    PolyLineAnnotation,  # noqa: F401
-    SaturationTool,  # noqa: F401
-    SegmentationLayer,  # noqa: F401
-    SegmentDefaultColorTool,  # noqa: F401
-    SegmentIdMapEntry,  # noqa: F401
+    BlendTool,  # noqa: F401
+    OpacityTool,  # noqa: F401
+    VolumeRenderingTool,  # noqa: F401
+    VolumeRenderingGainTool,  # noqa: F401
+    VolumeRenderingDepthSamplesTool,  # noqa: F401
+    CrossSectionRenderScaleTool,  # noqa: F401
     SelectedAlphaTool,  # noqa: F401
-    SelectedLayerState,  # noqa: F401
-    SelectSegmentsTool,  # noqa: F401
-    ShaderControlTool,  # noqa: F401
-    SidePanelLocation,  # noqa: F401
-    SingleMeshLayer,  # noqa: F401
-    SkeletonRenderingLineWidth2dTool,  # noqa: F401
-    SkeletonRenderingLineWidth3dTool,  # noqa: F401
+    NotSelectedAlphaTool,  # noqa: F401
+    ObjectAlphaTool,  # noqa: F401
+    HideSegmentZeroTool,  # noqa: F401
+    HoverHighlightTool,  # noqa: F401
+    BaseSegmentColoringTool,  # noqa: F401
+    IgnoreNullVisibleSetTool,  # noqa: F401
+    ColorSeedTool,  # noqa: F401
+    SegmentDefaultColorTool,  # noqa: F401
+    MeshRenderScaleTool,  # noqa: F401
+    MeshSilhouetteRenderingTool,  # noqa: F401
+    SaturationTool,  # noqa: F401
     SkeletonRenderingMode2dTool,  # noqa: F401
     SkeletonRenderingMode3dTool,  # noqa: F401
-    SkeletonRenderingOptions,  # noqa: F401
-    SpatialSkeletonNodeFilterType,  # noqa: F401
+    SkeletonRenderingLineWidth2dTool,  # noqa: F401
+    SkeletonRenderingLineWidth3dTool,  # noqa: F401
+    ShaderControlTool,  # noqa: F401
+    MergeSegmentsTool,  # noqa: F401
     SplitSegmentsTool,  # noqa: F401
-    StackLayout,  # noqa: F401
-    StarredSegments,  # noqa: F401
+    SelectSegmentsTool,  # noqa: F401
+    DimensionTool,  # noqa: F401
+    SidePanelLocation,  # noqa: F401
+    SelectedLayerState,  # noqa: F401
     StatisticsDisplayState,  # noqa: F401
-    Tool,  # noqa: F401
+    LayerSidePanelState,  # noqa: F401
+    LayerListPanelState,  # noqa: F401
+    HelpPanelState,  # noqa: F401
+    DimensionPlaybackVelocity,  # noqa: F401
+    Layer,  # noqa: F401
+    PointAnnotationLayer,  # noqa: F401
+    CoordinateSpaceTransform,  # noqa: F401
+    LayerDataSubsource,  # noqa: F401
+    LayerDataSource,  # noqa: F401
+    LayerDataSources,  # noqa: F401
+    InvlerpParameters,  # noqa: F401
     TransferFunctionParameters,  # noqa: F401
-    ViewerState,  # noqa: F401
+    ImageLayer,  # noqa: F401
+    SpatialSkeletonNodeFilterType,  # noqa: F401
+    SkeletonRenderingOptions,  # noqa: F401
+    StarredSegments,  # noqa: F401
     VisibleSegments,  # noqa: F401
-    VolumeRenderingDepthSamplesTool,  # noqa: F401
-    VolumeRenderingGainTool,  # noqa: F401
-    VolumeRenderingTool,  # noqa: F401
-    column_layout,  # noqa: F401
+    SegmentationLayer,  # noqa: F401
+    SingleMeshLayer,  # noqa: F401
+    Annotation,  # noqa: F401
+    PointAnnotation,  # noqa: F401
+    LineAnnotation,  # noqa: F401
+    PolyLineAnnotation,  # noqa: F401
+    AxisAlignedBoundingBoxAnnotation,  # noqa: F401
+    EllipsoidAnnotation,  # noqa: F401
+    AnnotationPropertySpec,  # noqa: F401
+    AnnotationLayer,  # noqa: F401
+    LocalAnnotationLayer,  # noqa: F401
+    ManagedLayer,  # noqa: F401
+    Layers,  # noqa: F401
+    LinkedPosition,  # noqa: F401
+    LinkedZoomFactor,  # noqa: F401
+    LinkedDepthRange,  # noqa: F401
+    LinkedOrientationState,  # noqa: F401
+    CrossSection,  # noqa: F401
+    CrossSectionMap,  # noqa: F401
+    DataPanelLayout,  # noqa: F401
+    StackLayout,  # noqa: F401
     row_layout,  # noqa: F401
+    column_layout,  # noqa: F401
+    LayerGroupViewer,  # noqa: F401
+    ViewerState,  # noqa: F401
 )

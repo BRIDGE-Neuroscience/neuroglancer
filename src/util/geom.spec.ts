@@ -19,36 +19,18 @@ import type { OrientedSliceScales } from "#src/util/geom.js";
 import {
   getFrustrumPlanes,
   isAABBVisible,
-  mat3,
   mat4,
   quat,
   calculateOrientedSliceScales,
   vec3,
 } from "#src/util/geom.js";
 
-// This is copied from data_panel_layout.ts to avoid the dependency; keep it in
-// sync with the definition there.
+// This is copied from data_panel_layout.ts to avoid the dependency.
 type NamedAxes = "xy" | "xz" | "yz";
-function orientationForRightUp(right: vec3, up: vec3): quat {
-  const negUp = vec3.negate(vec3.create(), up);
-  const depth = vec3.cross(vec3.create(), right, negUp);
-  const viewToWorld = mat3.fromValues(
-    right[0], right[1], right[2],
-    negUp[0], negUp[1], negUp[2],
-    depth[0], depth[1], depth[2],
-  );
-  return quat.normalize(
-    quat.create(),
-    quat.fromMat3(quat.create(), viewToWorld),
-  );
-}
-const RIGHT = vec3.fromValues(1, 0, 0);
-const ANTERIOR = vec3.fromValues(0, 1, 0);
-const SUPERIOR = vec3.fromValues(0, 0, 1);
 const AXES_RELATIVE_ORIENTATION = new Map<NamedAxes, quat | undefined>([
-  ["xy", orientationForRightUp(RIGHT, ANTERIOR)],
-  ["xz", orientationForRightUp(RIGHT, SUPERIOR)],
-  ["yz", orientationForRightUp(ANTERIOR, SUPERIOR)],
+  ["xy", undefined],
+  ["xz", quat.rotateX(quat.create(), quat.create(), Math.PI / 2)],
+  ["yz", quat.rotateY(quat.create(), quat.create(), Math.PI / 2)],
 ]);
 
 describe("getFrustrumPlanes", () => {
@@ -130,7 +112,7 @@ describe("calculateOrientedSliceScales", () => {
     ["xz", { width: { scale: 1, unit: "m" }, height: { scale: 3, unit: "s" } }],
     [
       "yz",
-      { width: { scale: 2, unit: "Hz" }, height: { scale: 3, unit: "s" } },
+      { width: { scale: 3, unit: "s" }, height: { scale: 2, unit: "Hz" } },
     ],
   ])("works for default axis-aligned orientation: %s", (key, result) => {
     const scales = vec3.fromValues(1, 2, 3);
@@ -146,7 +128,7 @@ describe("calculateOrientedSliceScales", () => {
     ["xz", { width: { scale: 1, unit: "m" }, height: { scale: -1, unit: "" } }],
     [
       "yz",
-      { width: { scale: 3, unit: "Hz" }, height: { scale: -1, unit: "" } },
+      { width: { scale: -1, unit: "" }, height: { scale: 3, unit: "Hz" } },
     ],
   ])(
     "works for 2D dataset default axis-aligned orientation: %s",

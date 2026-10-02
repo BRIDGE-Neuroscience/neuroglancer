@@ -104,7 +104,6 @@ export interface LayerGroupViewerState {
   crossSectionBackgroundColor: TrackableRGB;
   perspectiveViewBackgroundColor: TrackableRGB;
   hideCrossSectionBackground3D: TrackableBoolean;
-  showCrossSectionOutline3D: TrackableBoolean;
   pickRadius: TrackableValue<number>;
 }
 
@@ -364,9 +363,6 @@ export class LayerGroupViewer extends RefCounted {
   }
   get hideCrossSectionBackground3D() {
     return this.viewerState.hideCrossSectionBackground3D;
-  }
-  get showCrossSectionOutline3D() {
-    return this.viewerState.showCrossSectionOutline3D;
   }
   get showScaleBar() {
     return this.viewerState.showScaleBar;

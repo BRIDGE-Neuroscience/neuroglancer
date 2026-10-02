@@ -56,7 +56,7 @@ import {
   EventActionMap,
   registerActionListener,
 } from "#src/util/event_action_map.js";
-import { mat3, quat, vec3 } from "#src/util/geom.js";
+import { quat } from "#src/util/geom.js";
 import {
   verifyObject,
   verifyObjectProperty,
@@ -101,7 +101,6 @@ export interface ViewerUIState
   crossSectionBackgroundColor: TrackableRGB;
   perspectiveViewBackgroundColor: TrackableRGB;
   hideCrossSectionBackground3D: TrackableBoolean;
-  showCrossSectionOutline3D: TrackableBoolean;
   pickRadius: TrackableValue<number>;
 }
 
@@ -112,47 +111,10 @@ export interface DataDisplayLayout extends RefCounted {
 
 type NamedAxes = "xy" | "xz" | "yz";
 
-// Neuroglancer's cross-section panels render with the viewport origin at the
-// top-left, i.e. screen +Y points *down*. For a volume whose display axes are in
-// real-space RAS order (+x = Right, +y = Anterior, +z = Superior), that
-// convention renders the standard anatomical planes vertically flipped, so a
-// correctly-oriented MNI volume looks "upside-down"/rotated.
-//
-// To make a correctly-oriented dataset appear in the expected planes, each
-// panel's view orientation is derived from the world axes that should point to
-// the right and to the top of the screen. Because screen +Y points down, the
-// view->world rotation R has columns [right, -up, right x -up]. R is constructed
-// as a pure rotation (determinant +1), so this only reorients the default view --
-// it introduces no flip or mirror and does not resample or negate any data axis;
-// it assumes the data is already in a correct real-space frame.
-function orientationForRightUp(right: vec3, up: vec3): quat {
-  const negUp = vec3.negate(vec3.create(), up);
-  const depth = vec3.cross(vec3.create(), right, negUp);
-  // mat3.fromValues is column-major: columns are the world directions that the
-  // view's +x, +y and +z axes map to.
-  const viewToWorld = mat3.fromValues(
-    right[0], right[1], right[2],
-    negUp[0], negUp[1], negUp[2],
-    depth[0], depth[1], depth[2],
-  );
-  return quat.normalize(
-    quat.create(),
-    quat.fromMat3(quat.create(), viewToWorld),
-  );
-}
-
-// Real-space RAS display axes.
-const RIGHT = vec3.fromValues(1, 0, 0);
-const ANTERIOR = vec3.fromValues(0, 1, 0);
-const SUPERIOR = vec3.fromValues(0, 0, 1);
-
 const AXES_RELATIVE_ORIENTATION = new Map<NamedAxes, quat | undefined>([
-  // Axial (x-y plane): Right -> screen right, Anterior -> screen up.
-  ["xy", orientationForRightUp(RIGHT, ANTERIOR)],
-  // Coronal (x-z plane): Right -> screen right, Superior -> screen up.
-  ["xz", orientationForRightUp(RIGHT, SUPERIOR)],
-  // Sagittal (y-z plane): Anterior -> screen right, Superior -> screen up.
-  ["yz", orientationForRightUp(ANTERIOR, SUPERIOR)],
+  ["xy", undefined],
+  ["xz", quat.rotateX(quat.create(), quat.create(), Math.PI / 2)],
+  ["yz", quat.rotateY(quat.create(), quat.create(), Math.PI / 2)],
 ]);
 
 const oneSquareSymbol = "◻";
@@ -222,7 +184,6 @@ export function getCommonViewerState(viewer: ViewerUIState) {
     visibility: viewer.visibility,
     scaleBarOptions: viewer.scaleBarOptions,
     hideCrossSectionBackground3D: viewer.hideCrossSectionBackground3D,
-    showCrossSectionOutline3D: viewer.showCrossSectionOutline3D,
     pickRadius: viewer.pickRadius,
   };
 }

@@ -234,15 +234,6 @@ export class DataSourceSubsourceView extends RefCounted {
       sourceTypeStr = "meshes (multi-res.)";
     } else if (subsource.mesh instanceof SkeletonSource) {
       sourceTypeStr = "skeletons";
-    } else if (subsource.zarrVectors !== undefined) {
-      // Name the geometry, not the slot: the id no longer says what it is, and
-      // "point_cloud" vs "mesh" vs "streamline" is the useful thing to see.
-      const kind = (subsource.zarrVectors as { geometryKind?: string })
-        .geometryKind;
-      sourceTypeStr =
-        kind === undefined
-          ? "zarr-vectors geometry"
-          : `zarr-vectors ${kind.replace(/_/g, " ")}`;
     } else if (subsource.segmentPropertyMap !== undefined) {
       sourceTypeStr = "segment property map";
     } else if (subsource.local !== undefined) {

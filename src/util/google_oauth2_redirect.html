@@ -6,63 +6,11 @@
       const data = Object.fromEntries(
         new URLSearchParams(location.hash.substring(1)).entries(),
       );
-
-      // Deliver over both transports; the initiating window takes whichever
-      // arrives first.
-      //
-      // When the initiator is cross-origin isolated, `COOP: same-origin` puts
-      // this popup in a separate browsing context group, so `window.opener` is
-      // null and postMessage cannot work.  BroadcastChannel is same-origin but
-      // crosses browsing context groups, so it still gets through.
-      //
-      // The channel name embeds the attempt's random `state`, matching
-      // authResponseChannelName() in google_oauth2.ts — keep the
-      // "neuroglancer-oauth2-" prefix in sync.  A BroadcastChannel is readable
-      // by any same-origin context and this payload is a bearer token, so the
-      // name is a secret only this attempt's participants hold rather than a
-      // well-known string anything could subscribe to.
-      let deliveredByBroadcast = false;
-
-      // Attempted first, and independently of postMessage: if postMessage
-      // throws on a detached opener proxy, the broadcast must still be sent —
-      // under isolation it is the only transport that can work.
-      try {
-        if (typeof data.state === "string" && data.state.length > 0) {
-          const channel = new BroadcastChannel(
-            "neuroglancer-oauth2-" + data.state,
-          );
-          channel.postMessage(data);
-          channel.close();
-          deliveredByBroadcast = true;
-        }
-      } catch (e) {
-        console.error("Failed to broadcast oauth2 response: ", e);
-      }
-
-      try {
-        const target = window.opener || window.parent;
-        if (target === window) {
-          console.log(
-            "No opener/parent for oauth2 response; relying on BroadcastChannel.",
-          );
-        } else {
-          target.postMessage(data, window.location.origin);
-        }
-      } catch (e) {
-        console.error("Failed to postMessage oauth2 response: ", e);
-      }
-
-      // Under COOP the initiating window holds only a severed handle, so it
-      // cannot close this popup — `close()` there is a silent no-op.  Close
-      // ourselves instead, after a beat so the confirmation is visible.
-      if (deliveredByBroadcast) {
-        setTimeout(() => {
-          try {
-            window.close();
-          } catch (e) {
-            // Leave the manual button as the fallback.
-          }
-        }, 1500);
+      const target = window.opener || window.parent;
+      if (target === window) {
+        console.error("No opener/parent to receive successful oauth2 response");
+      } else {
+        target.postMessage(data, window.location.origin);
       }
     </script>
   </head>

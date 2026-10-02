@@ -97,7 +97,6 @@ import {
 } from "#src/sliceview/volume/frontend.js";
 import type { TypedNumberArrayConstructor } from "#src/util/array.js";
 import { transposeNestedArrays } from "#src/util/array.js";
-import { packColor, parseRGBColorSpecification } from "#src/util/color.js";
 import { DATA_TYPE_ARRAY_CONSTRUCTOR, DataType } from "#src/util/data_type.js";
 import { mat4, vec3 } from "#src/util/geom.js";
 import {
@@ -1159,8 +1158,7 @@ function parseInlinePropertyMap(data: unknown): InlineSegmentPropertyMap {
           type !== "description" &&
           type !== "string" &&
           type !== "tags" &&
-          type !== "number" &&
-          type !== "rgb"
+          type !== "number"
         ) {
           throw new Error(`Invalid property type: ${JSON.stringify(type)}`);
         }
@@ -1234,26 +1232,6 @@ function parseInlinePropertyMap(data: unknown): InlineSegmentPropertyMap {
           if (v > max) max = v;
         }
         return { id, description, type, dataType, values, bounds: [min, max] };
-      }
-      if (type === "rgb") {
-        // Each value is a color specification (e.g. "#f5f5f5"); pack it into the
-        // `R | G<<8 | B<<16` encoding used by `segmentStatedColors`.
-        const values = verifyObjectProperty(
-          propertyObj,
-          "values",
-          (valuesObj) => {
-            verifyStringArray(valuesObj);
-            if (valuesObj.length !== numIds) {
-              throw new Error(
-                `Expected ${numIds} values, but received: ${valuesObj.length}`,
-              );
-            }
-            return Int32Array.from(valuesObj, (x) =>
-              packColor(parseRGBColorSpecification(x)),
-            );
-          },
-        );
-        return { id, description, type, values };
       }
       const values = verifyObjectProperty(
         propertyObj,

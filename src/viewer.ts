@@ -71,9 +71,6 @@ import {
 import { overlaysOpen } from "#src/overlay.js";
 import { ScreenshotHandler } from "#src/python_integration/screenshots.js";
 import { allRenderLayerRoles, RenderLayerRole } from "#src/renderlayer.js";
-import { getRoiStoreConfig, roiStoreEnabled } from "#src/roi_store/config.js";
-import { getRoiStoreAuth } from "#src/roi_store/credentials.js";
-import { RoiStoreSignInWidget } from "#src/roi_store/sign_in_widget.js";
 import { StatusMessage } from "#src/status.js";
 import {
   ElementVisibilityFromTrackableBoolean,
@@ -273,7 +270,6 @@ class TrackableViewerState extends CompoundTrackable {
       "hideCrossSectionBackground3D",
       viewer.hideCrossSectionBackground3D,
     );
-    this.add("showCrossSectionOutline3D", viewer.showCrossSectionOutline3D);
     this.add(
       "gpuMemoryLimit",
       viewer.dataContext.chunkQueueManager.capacities.gpuMemory.sizeLimit,
@@ -443,7 +439,6 @@ export class Viewer extends RefCounted implements ViewerState {
   showScaleBar = new TrackableBoolean(true, true);
   showPerspectiveSliceViews = new TrackableBoolean(true, true);
   hideCrossSectionBackground3D = new TrackableBoolean(false, false);
-  showCrossSectionOutline3D = new TrackableBoolean(false, false);
   visibleLayerRoles = allRenderLayerRoles();
   showDefaultAnnotations = new TrackableBoolean(true, true);
   crossSectionBackgroundColor = new TrackableRGB(
@@ -782,19 +777,6 @@ export class Viewer extends RefCounted implements ViewerState {
     if (stateShareEnabled) {
       const stateShare = this.registerDisposer(new StateShare(this));
       topRow.appendChild(stateShare.element);
-    }
-
-    if (roiStoreEnabled) {
-      const auth = getRoiStoreAuth();
-      const signIn = this.registerDisposer(new RoiStoreSignInWidget(auth));
-      topRow.appendChild(signIn.element);
-      if (getRoiStoreConfig().eager && !auth.signedIn) {
-        // "Authenticate before adding the url": obtain the token at viewer
-        // start rather than lazily on first save, so a bucket that denies
-        // anonymous listing populates the picker without a later prompt.
-        // Non-fatal -- getCredentialsWithStatus drives its own retry UI.
-        auth.signIn().catch(() => {});
-      }
     }
 
     {

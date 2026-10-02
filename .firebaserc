@@ -7,16 +7,9 @@
       "hosting": {
         "ng-wizard-demo": [
           "ng-wizard-demo"
-        ]
-      }
-    },
-    "zarr-vectors-test": {
-      "hosting": {
-        "ng-zarr-vectors": [
-          "zarr-vectors-viewer"
         ],
-        "ng-pyodide": [
-          "zarr-vectors-pyodide"
+        "ng-zarr-vectors": [
+          "ng-zarr-vectors"
         ]
       }
     },

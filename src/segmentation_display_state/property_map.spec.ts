@@ -37,37 +37,6 @@ describe("PreprocessedSegmentPropertyMap", () => {
     expect(map.getSegmentInlineIndex(0x50000001en)).toEqual(-1);
     expect(map.getSegmentInlineIndex(0n)).toEqual(-1);
   });
-
-  test("returns rgb property colors, packed as R|G<<8|B<<16", () => {
-    const map = new PreprocessedSegmentPropertyMap({
-      inlineProperties: {
-        ids: BigUint64Array.of(5n, 15n),
-        properties: [
-          // #010203 => R=1, G=2, B=3 => 1 | 2<<8 | 3<<16.
-          {
-            type: "rgb",
-            id: "color",
-            values: Int32Array.of(1 | (2 << 8) | (3 << 16), -1),
-          },
-        ],
-      },
-    });
-    expect(map.getSegmentColor(5n)).toEqual(1 | (2 << 8) | (3 << 16));
-    // -1 sentinel => no color for this id.
-    expect(map.getSegmentColor(15n)).toBeUndefined();
-    // id not in the map.
-    expect(map.getSegmentColor(99n)).toBeUndefined();
-  });
-
-  test("returns undefined color when there is no color property", () => {
-    const map = new PreprocessedSegmentPropertyMap({
-      inlineProperties: {
-        ids: BigUint64Array.of(5n),
-        properties: [{ type: "label", id: "label", values: ["a"] }],
-      },
-    });
-    expect(map.getSegmentColor(5n)).toBeUndefined();
-  });
 });
 
 describe("mergeSegmentPropertyMaps", () => {
@@ -95,35 +64,6 @@ describe("mergeSegmentPropertyMaps", () => {
         { type: "string", id: "prop2", values: ["a", "", "b", ""] },
       ],
     });
-  });
-
-  test("fills missing ids in a merged rgb property with the -1 sentinel", () => {
-    const a = new SegmentPropertyMap({
-      inlineProperties: {
-        ids: BigUint64Array.of(5n, 6n, 8n),
-        properties: [
-          { type: "rgb", id: "color", values: Int32Array.of(10, 20, 30) },
-        ],
-      },
-    });
-    const b = new SegmentPropertyMap({
-      inlineProperties: {
-        ids: BigUint64Array.of(5n, 7n),
-        properties: [{ type: "string", id: "prop2", values: ["a", "b"] }],
-      },
-    });
-    const c = mergeSegmentPropertyMaps([a, b]);
-    expect(c?.inlineProperties).toEqual({
-      ids: BigUint64Array.of(5n, 6n, 7n, 8n),
-      properties: [
-        // ids 5/6/8 keep their colors; id 7 (only in `b`) gets -1 = no color.
-        { type: "rgb", id: "color", values: Int32Array.of(10, 20, -1, 30) },
-        { type: "string", id: "prop2", values: ["a", "", "b", ""] },
-      ],
-    });
-    const preprocessed = new PreprocessedSegmentPropertyMap(c!);
-    expect(preprocessed.getSegmentColor(6n)).toEqual(20);
-    expect(preprocessed.getSegmentColor(7n)).toBeUndefined();
   });
 });
 

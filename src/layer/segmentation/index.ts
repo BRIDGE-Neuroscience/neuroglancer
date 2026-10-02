@@ -15,13 +15,13 @@
  */
 
 import "#src/layer/segmentation/style.css";
-import "#src/layer/segmentation/spatial_skeleton.css";
 
-import type {
-  AnnotationPropertySpec,
-  AnnotationReference,
-} from "#src/annotation/index.js";
-import { LocalAnnotationSource } from "#src/annotation/index.js";
+import svg_circle from "ikonate/icons/circle.svg?raw";
+import svg_flag from "ikonate/icons/flag.svg?raw";
+import svg_minus from "ikonate/icons/minus.svg?raw";
+import svg_origin from "ikonate/icons/origin.svg?raw";
+import svg_share_android from "ikonate/icons/share-android.svg?raw";
+import { debounce } from "lodash-es";
 import type { CoordinateTransformSpecification } from "#src/coordinate_transform.js";
 import { emptyValidCoordinateSpace } from "#src/coordinate_transform.js";
 import type { DataSourceSpecification } from "#src/datasource/index.js";
@@ -29,16 +29,6 @@ import {
   LocalDataSource,
   localEquivalencesUrl,
 } from "#src/datasource/local.js";
-import { buildRoiLabelField } from "#src/datasource/zarr-vectors/label_field.js";
-import type { ObjectAdmission } from "#src/datasource/zarr-vectors/object_budget.js";
-import type {
-  RoiBackgroundUniforms,
-  RoiGroupConfig,
-  RoiLabelField,
-  RoiObjectAttrColumn,
-} from "#src/datasource/zarr-vectors/roi.js";
-import { RoiFilterState } from "#src/datasource/zarr-vectors/roi_filter_state.js";
-
 import type {
   LayerActionContext,
   ManagedUserLayer,
@@ -46,7 +36,6 @@ import type {
   UserLayerSelectionState,
 } from "#src/layer/index.js";
 import {
-  LayerReference,
   LinkedLayerGroup,
   registerLayerType,
   registerLayerTypeDetector,
@@ -58,25 +47,19 @@ import { layerDataSourceSpecificationFromJson } from "#src/layer/layer_data_sour
 import * as json_keys from "#src/layer/segmentation/json_keys.js";
 import { registerLayerControls } from "#src/layer/segmentation/layer_controls.js";
 import {
-  buildObjectAttrColumns,
-  buildRoiGroupConfigs,
-  rebuildRoiAnnotations,
-  ROI_OVERLAY_SHADER,
-  ROI_OVERLAY_SHADER_HIDE_2D,
-  warnOnceAdmissionUnavailable,
-} from "#src/layer/segmentation/roi_channel.js";
-import {
   getNodeIdFromLayerSelectionState,
   getSegmentIdFromLayerSelectionValue,
   SpatialSkeletonHoverState,
 } from "#src/layer/segmentation/selection.js";
-import { executeSpatialSkeletonReroot } from "#src/layer/segmentation/spatial_skeleton_commands.js";
 import {
-  findClosestSpatialSkeletonGridLevelBySpacing,
-  getSpatialSkeletonGridHistogramConfig,
-} from "#src/layer/segmentation/spatial_skeleton_grid.js";
-import { displaySpatialSkeletonSelection } from "#src/layer/segmentation/spatial_skeleton_selection.js";
-import { registerSpatialSkeletonTabs } from "#src/layer/segmentation/spatial_skeleton_tabs.js";
+  executeSpatialSkeletonDeleteNode,
+  executeSpatialSkeletonNodeConfidenceUpdate,
+  executeSpatialSkeletonNodeDescriptionUpdate,
+  executeSpatialSkeletonNodeRadiusUpdate,
+  executeSpatialSkeletonReroot,
+  executeSpatialSkeletonNodeTrueEndUpdate,
+  showSpatialSkeletonActionError,
+} from "#src/layer/segmentation/spatial_skeleton_commands.js";
 import {
   MeshLayer,
   MeshSource,
@@ -86,9 +69,11 @@ import {
 import { getRenderLayerTransform } from "#src/render_coordinate_transform.js";
 import {
   RenderScaleHistogram,
+  numRenderScaleHistogramBins,
+  renderScaleHistogramBinSize,
+  renderScaleHistogramOrigin,
   trackableRenderScaleTarget,
 } from "#src/render_scale_statistics.js";
-import { RenderLayerRole } from "#src/renderlayer.js";
 import { getCssColor, SegmentColorHash } from "#src/segment_color.js";
 import {
   addSegmentToVisibleSets,
@@ -133,37 +118,36 @@ import type {
   SpatiallyIndexedSkeletonNode,
   SpatialSkeletonSourceState,
 } from "#src/skeleton/api.js";
-import { resolveSkeletonDefaultShader } from "#src/skeleton/default_shader.js";
 import {
   PerspectiveViewSkeletonLayer,
   SkeletonLayer,
   SkeletonRenderingOptions,
-  type SkeletonSource,
-  DEFAULT_FRAGMENT_MAIN,
   SliceViewPanelSkeletonLayer,
-} from "#src/skeleton/frontend.js";
-import {
-  findSpatiallyIndexedSkeletonNode,
-  getSpatiallyIndexedSkeletonDirectChildren,
-  getSpatiallyIndexedSkeletonNodeParent,
-} from "#src/skeleton/node_traversal.js";
-import { SpatialSkeletonNodeFilterType } from "#src/skeleton/node_types.js";
-import type { VertexAttrStats } from "#src/skeleton/spatial_base.js";
-import {
-  buildSpatialSkeletonGridLevels,
-  selectSpatialSkeletonGridLevelByBudget,
-  SpatialSkeletonDetailFocus,
-  type SpatialSkeletonGridLevel,
-  type SpatialSkeletonGridSize,
-} from "#src/skeleton/spatial_chunk_sizing.js";
-import {
   PerspectiveViewSpatiallyIndexedSkeletonLayer,
   SliceViewPanelSpatiallyIndexedSkeletonLayer,
   SpatiallyIndexedSkeletonLayer,
   SpatiallyIndexedSkeletonSource,
   MultiscaleSpatiallyIndexedSkeletonSource,
   computeDiagonalModelToGlobalMetersScale,
-} from "#src/skeleton/spatial_frontend.js";
+} from "#src/skeleton/frontend.js";
+import {
+  findSpatiallyIndexedSkeletonNode,
+  getSpatiallyIndexedSkeletonDirectChildren,
+  getSpatiallyIndexedSkeletonNodeParent,
+} from "#src/skeleton/node_traversal.js";
+import {
+  classifySpatialSkeletonDisplayNodeType as getSpatialSkeletonDisplayNodeType,
+  getSpatialSkeletonNodeFilterLabel,
+  getSpatialSkeletonNodeIconFilterType,
+  SpatialSkeletonDisplayNodeType,
+  SpatialSkeletonNodeFilterType,
+} from "#src/skeleton/node_types.js";
+import {
+  buildSpatialSkeletonGridLevels,
+  getSpatialSkeletonGridSpacing,
+  type SpatialSkeletonGridLevel,
+  type SpatialSkeletonGridSize,
+} from "#src/skeleton/spatial_chunk_sizing.js";
 import {
   editableSpatiallyIndexedSkeletonSourceSupportsAction,
   getEditableSpatiallyIndexedSkeletonSource,
@@ -197,7 +181,7 @@ import { SegmentDisplayTab } from "#src/ui/segment_list.js";
 import { registerSegmentSelectTools } from "#src/ui/segment_select_tools.js";
 import { registerSegmentSplitMergeTools } from "#src/ui/segment_split_merge_tools.js";
 import { DisplayOptionsTab } from "#src/ui/segmentation_display_options_tab.js";
-
+import { SpatialSkeletonEditTab } from "#src/ui/spatial_skeleton_edit_tab.js";
 import { registerSpatialSkeletonEditModeTool } from "#src/ui/spatial_skeleton_edit_tool.js";
 import { Uint64Map } from "#src/uint64_map.js";
 import { Uint64OrderedSet } from "#src/uint64_ordered_set.js";
@@ -212,8 +196,7 @@ import {
 } from "#src/util/color.js";
 import type { Borrowed, Owned } from "#src/util/disposable.js";
 import { RefCounted } from "#src/util/disposable.js";
-import type { vec4 } from "#src/util/geom.js";
-import { vec3 } from "#src/util/geom.js";
+import type { vec3, vec4 } from "#src/util/geom.js";
 import {
   parseArray,
   parseUint64,
@@ -228,12 +211,107 @@ import * as matrix from "#src/util/matrix.js";
 import { Signal } from "#src/util/signal.js";
 import { TrackableEnum } from "#src/util/trackable_enum.js";
 import { makeWatchableShaderError } from "#src/webgl/dynamic_shader.js";
-
+import { makeDeleteButton } from "#src/widget/delete_button.js";
 import type { DependentViewContext } from "#src/widget/dependent_view_widget.js";
-
+import { makeIcon } from "#src/widget/icon.js";
 import { registerLayerShaderControlsTool } from "#src/widget/shader_controls.js";
 
 const MAX_LAYER_BAR_UI_INDICATOR_COLORS = 6;
+
+const SPATIAL_SKELETON_NODE_TYPE_ICONS: Record<
+  SpatialSkeletonDisplayNodeType,
+  string
+> = {
+  [SpatialSkeletonDisplayNodeType.ROOT]: svg_origin,
+  [SpatialSkeletonDisplayNodeType.BRANCH_START]: svg_share_android,
+  [SpatialSkeletonDisplayNodeType.REGULAR]: svg_minus,
+  [SpatialSkeletonDisplayNodeType.VIRTUAL_END]: svg_circle,
+};
+
+function getSpatialSkeletonNodeTypeLabel(
+  nodeType: SpatialSkeletonDisplayNodeType,
+  nodeHasTrueEnd: boolean,
+) {
+  if (nodeHasTrueEnd) return "True end";
+  switch (nodeType) {
+    case SpatialSkeletonDisplayNodeType.ROOT:
+      return "Root";
+    case SpatialSkeletonDisplayNodeType.BRANCH_START:
+      return "Branch point";
+    case SpatialSkeletonDisplayNodeType.VIRTUAL_END:
+      return "Leaf";
+    default:
+      return "Node";
+  }
+}
+
+function formatSpatialSkeletonPosition(
+  modelPosition: ArrayLike<number>,
+  names?: readonly string[],
+) {
+  const x = Math.round(Number(modelPosition[0]));
+  const y = Math.round(Number(modelPosition[1]));
+  const z = Math.round(Number(modelPosition[2]));
+  const n = names ?? ["x", "y", "z"];
+  return {
+    copyText: `${x}, ${y}, ${z}`,
+    displayText: `${x} ${y} ${z}`,
+    fullText: `${n[0]}: ${x} ${n[1]}: ${y} ${n[2]}: ${z}`,
+    x,
+    y,
+    z,
+  };
+}
+
+function formatSpatialSkeletonEditableNumber(
+  value: number | undefined,
+  fallback = "0",
+) {
+  return value === undefined ? fallback : `${value}`;
+}
+
+function getSpatialSkeletonSegmentChipColors(
+  displayState: SegmentationDisplayState | undefined | null,
+  segmentId: number,
+) {
+  const color = getBaseObjectColor(
+    displayState,
+    BigInt(segmentId),
+    new Float32Array(4),
+  );
+  const r = Math.round(color[0] * 255);
+  const g = Math.round(color[1] * 255);
+  const b = Math.round(color[2] * 255);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return {
+    background: getCssColor(color),
+    foreground: luminance > 0.6 ? "#101010" : "#f5f5f5",
+  };
+}
+
+function bindSpatialSkeletonSegmentSelection(
+  element: HTMLElement,
+  selectSegment: (id: bigint, pin: true | "force-unpin") => void,
+  segmentId: number,
+) {
+  const id = BigInt(segmentId);
+  const hasSegmentSelectionModifiers = (event: MouseEvent) =>
+    event.ctrlKey && !event.altKey && !event.metaKey;
+  element.addEventListener("mousedown", (event: MouseEvent) => {
+    if (event.button !== 2 || !hasSegmentSelectionModifiers(event)) return;
+    selectSegment(id, event.shiftKey ? "force-unpin" : true);
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  element.addEventListener("contextmenu", (event: MouseEvent) => {
+    if (!hasSegmentSelectionModifiers(event)) return;
+    if (event.button !== 2) {
+      selectSegment(id, event.shiftKey ? "force-unpin" : true);
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  });
+}
 
 export class SegmentationUserLayerGroupState
   extends RefCounted
@@ -510,6 +588,95 @@ class LinkedSegmentationGroupState<
   }
 }
 
+function findClosestSpatialSkeletonGridLevelBySpacing(
+  levels: SpatialSkeletonGridLevel[],
+  spacing: number,
+): number {
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < levels.length; ++i) {
+    const gridSpacing = getSpatialSkeletonGridSpacing(levels[i].size);
+    const distance = Math.abs(gridSpacing - spacing);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = i;
+    }
+  }
+  return bestIndex;
+}
+
+function getSpatialSkeletonGridHistogramConfig(
+  levels: SpatialSkeletonGridLevel[],
+) {
+  if (levels.length === 0) {
+    return {
+      origin: renderScaleHistogramOrigin,
+      binSize: renderScaleHistogramBinSize,
+    };
+  }
+  const logSpacings: number[] = [];
+  let minLogSpacing = Number.POSITIVE_INFINITY;
+  let maxLogSpacing = Number.NEGATIVE_INFINITY;
+  for (const level of levels) {
+    const spacing = Math.max(getSpatialSkeletonGridSpacing(level.size), 1e-6);
+    const logSpacing = Math.log2(spacing);
+    logSpacings.push(logSpacing);
+    minLogSpacing = Math.min(minLogSpacing, logSpacing);
+    maxLogSpacing = Math.max(maxLogSpacing, logSpacing);
+  }
+  if (!Number.isFinite(minLogSpacing) || !Number.isFinite(maxLogSpacing)) {
+    return {
+      origin: renderScaleHistogramOrigin,
+      binSize: renderScaleHistogramBinSize,
+    };
+  }
+  logSpacings.sort((a, b) => a - b);
+  let minDelta = Number.POSITIVE_INFINITY;
+  for (let i = 1; i < logSpacings.length; ++i) {
+    const delta = logSpacings[i] - logSpacings[i - 1];
+    if (delta > 0) minDelta = Math.min(minDelta, delta);
+  }
+  const span = maxLogSpacing - minLogSpacing;
+  // Choose a bin size that spreads the levels across (most of) the widget
+  // width.  Reserve a few bins of padding on each side so the extreme
+  // levels aren't flush against the edges.  A single level (span 0) has no
+  // meaningful spread — fall back to the default bin size.
+  const coverageBinSize =
+    span > 0
+      ? span / Math.max(numRenderScaleHistogramBins - 4, 1)
+      : renderScaleHistogramBinSize;
+  // Never use a bin so large that two adjacent levels (minDelta apart in
+  // log space) collapse into the same bin — that would merge distinct
+  // scales into one bar.  When the coverage bin size already keeps them
+  // distinct (the common case: few, well-separated pyramid levels), the
+  // coverage value wins and the bars fan out across the full axis instead
+  // of bunching into a narrow cluster in the middle.
+  const maxBinSizeForDistinctBars = Number.isFinite(minDelta)
+    ? minDelta * 0.9
+    : Number.POSITIVE_INFINITY;
+  let binSize = Math.max(
+    0.05,
+    Math.min(coverageBinSize, maxBinSizeForDistinctBars),
+  );
+  if (!Number.isFinite(binSize) || binSize <= 0) {
+    binSize = renderScaleHistogramBinSize;
+  }
+
+  const range = numRenderScaleHistogramBins * binSize;
+  const desiredPadding = binSize * 2;
+  const minOrigin = maxLogSpacing + desiredPadding - range;
+  const maxOrigin = minLogSpacing - desiredPadding;
+  const centeredOrigin = (minLogSpacing + maxLogSpacing - range) / 2;
+  const clampedOrigin = Math.min(
+    Math.max(centeredOrigin, minOrigin),
+    maxOrigin,
+  );
+  const roundedBinSize = Math.max(binSize, 1e-3);
+  const roundedOrigin =
+    Math.round(clampedOrigin / roundedBinSize) * roundedBinSize;
+  return { origin: roundedOrigin, binSize: roundedBinSize };
+}
+
 class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
   constructor(public layer: SegmentationUserLayer) {
     // Even though `SegmentationUserLayer` assigns this to its `displayState` property, redundantly
@@ -546,17 +713,6 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
           return userLayer.displayState.linkedSegmentationColorGroup;
         },
       ),
-    );
-
-    // A segmentation layer other than this one whose labels dissect the tracts.
-    this.roiLabelLayer = layer.registerDisposer(
-      new LayerReference(layer.manager.rootLayers.addRef(), (managed) => {
-        const userLayer = managed.layer;
-        return (
-          userLayer === null ||
-          (userLayer instanceof SegmentationUserLayer && userLayer !== layer)
-        );
-      }),
     );
 
     this.originalSegmentationGroupState = layer.registerDisposer(
@@ -644,131 +800,30 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
       ),
     );
 
-    // LUT colors: apply the colors declared by an `rgb` segment property map by
-    // overlaying the user's stated colors on top of the map's colors into a
-    // derived, non-serialized map. Both the CPU color lookup
-    // (`getBaseObjectColor`) and the GPU segmentation renderer read
-    // `effectiveSegmentStatedColors`. When the map declares no colors it falls
-    // through to the user's `segmentStatedColors` unchanged, so datasets without
-    // a color LUT behave exactly as before.
-    const self = this;
-    this.derivedSegmentStatedColors = this.layer.registerDisposer(
-      new Uint64Map(),
-    );
-    this.effectiveSegmentStatedColors = {
-      changed: this.effectiveSegmentStatedColorsChanged,
-      get value() {
-        return self.effectiveStatedColorsUsesLut
-          ? self.derivedSegmentStatedColors
-          : self.segmentStatedColors.value;
-      },
-    };
-    const recomputeEffectiveStatedColors = () => {
-      const propertyMap = this.segmentPropertyMap.value;
-      const colorProperty = propertyMap?.colors;
-      if (colorProperty === undefined) {
-        // No LUT colors: `effectiveSegmentStatedColors` mirrors the user map.
-        this.effectiveStatedColorsUsesLut = false;
-      } else {
-        const derived = this.derivedSegmentStatedColors;
-        derived.clear();
-        const { ids } = propertyMap!.segmentPropertyMap.inlineProperties!;
-        const { values } = colorProperty;
-        for (let i = 0, n = ids.length; i < n; ++i) {
-          const color = values[i];
-          if (color >= 0) derived.set(ids[i], BigInt(color));
-        }
-        // A user-set stated color for an id overrides the LUT color.
-        for (const [id, color] of this.segmentStatedColors.value) {
-          derived.set(id, color);
-        }
-        this.effectiveStatedColorsUsesLut = true;
+    this.spatialSkeletonGridResolutionTarget2d.changed.add(() => {
+      const levels = this.spatialSkeletonGridLevels.value;
+      if (levels.length > 0) {
+        this.setSpatialSkeletonGridLevel(
+          "2d",
+          findClosestSpatialSkeletonGridLevelBySpacing(
+            levels,
+            this.spatialSkeletonGridResolutionTarget2d.value,
+          ),
+        );
       }
-      this.effectiveSegmentStatedColorsChanged.dispatch();
-    };
-    this.layer.registerDisposer(
-      this.segmentPropertyMap.changed.add(recomputeEffectiveStatedColors),
-    );
-    this.layer.registerDisposer(
-      this.segmentStatedColors.changed.add(recomputeEffectiveStatedColors),
-    );
-    recomputeEffectiveStatedColors();
-
-    this.spatialSkeletonGridResolutionTarget2d.changed.add(() =>
-      this.applySpatialSkeletonResolutionTarget(
-        "2d",
-        this.spatialSkeletonGridResolutionTarget2d.value,
-      ),
-    );
-    this.spatialSkeletonGridResolutionTarget3d.changed.add(() =>
-      this.applySpatialSkeletonResolutionTarget(
-        "3d",
-        this.spatialSkeletonGridResolutionTarget3d.value,
-      ),
-    );
-  }
-
-  /**
-   * Move a view's grid level to the one closest to `target`, but no finer than
-   * the memory budget allows.
-   *
-   * The budget is a CEILING, not a choice. It used to be a veto: while a
-   * budget-driven level was in force these listeners stood down entirely, so
-   * the resolution sliders moved, updated the URL, and changed nothing —
-   * silently. Clamping instead keeps the whole-brain out-of-memory case fixed
-   * (nothing can select a level that does not fit) while letting the slider do
-   * what it appears to do, in both directions, at any zoom.
-   *
-   * `levels` is COARSEST-first (`getSpatialSkeletonGridSizes` ends in
-   * `finestFirst.reverse()`), so a larger index is FINER, and
-   * `spatialSkeletonBudgetLevel` -- the largest index whose cost fits the GPU
-   * budget -- is an upper bound. Clamping is therefore a MINIMUM: coarser is
-   * always available, finer only up to what fits.
-   */
-  private applySpatialSkeletonResolutionTarget(
-    view: "2d" | "3d",
-    target: number,
-  ) {
-    const levels = this.spatialSkeletonGridLevels.value;
-    if (levels.length === 0) return;
-    // Under OBJECT focus the level is a consequence of what the memory budget
-    // admits, not of the camera; letting a resolution target write it too would
-    // simply overwrite that choice on the next frame. See
-    // {@link refreshSpatialSkeletonAdmission}.
-    if (
-      this.spatialSkeletonDetailFocus.value ===
-        SpatialSkeletonDetailFocus.OBJECT &&
-      this.spatialSkeletonComputeAdmission !== undefined
-    ) {
-      return;
-    }
-    const requested = findClosestSpatialSkeletonGridLevelBySpacing(
-      levels,
-      target,
-    );
-    // The whole-level ceiling is skipped once a per-cell budget is available.
-    //
-    // The two are rival answers to the same question, and the coarser one was
-    // winning: the target `requested` comes from `targetSpacingForCellBudget`,
-    // which divides the memory limit by the cells actually in view, while the
-    // ceiling asks whether the level would fit if EVERY cell were resident.
-    // Zooming in makes the first finer and leaves the second untouched, so
-    // `Math.min` pinned the level at the whole-level answer no matter how far
-    // the user zoomed -- the level simply never moved.
-    //
-    // Whole-volume residency would change that -- "if every cell were resident"
-    // stops being hypothetical -- but that is requested only under the object
-    // PARTITION, whose level is chosen by `refreshSpatialSkeletonAdmission` and
-    // never reaches here (the early return above). Object focus without the
-    // partition requests the frustum, like LOCAL, so it budgets like LOCAL.
-    const ceiling =
-      this.spatialSkeletonPerCellCostBytes.value.length > 0
-        ? undefined
-        : this.spatialSkeletonBudgetLevel;
-    this.setSpatialSkeletonGridLevel(
-      view,
-      ceiling === undefined ? requested : Math.min(requested, ceiling),
-    );
+    });
+    this.spatialSkeletonGridResolutionTarget3d.changed.add(() => {
+      const levels = this.spatialSkeletonGridLevels.value;
+      if (levels.length > 0) {
+        this.setSpatialSkeletonGridLevel(
+          "3d",
+          findClosestSpatialSkeletonGridLevelBySpacing(
+            levels,
+            this.spatialSkeletonGridResolutionTarget3d.value,
+          ),
+        );
+      }
+    });
   }
 
   segmentSelectionState = new SegmentSelectionState();
@@ -784,104 +839,6 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
   objectAlpha = trackableAlphaValue(1.0);
   hiddenObjectAlpha = trackableAlphaValue(0.5);
   skeletonLod = trackableFiniteFloat(0.0);
-  /** TrackVis-style ROI streamline filter (zarr-vectors); persists to the URL. */
-  roiFilter = new RoiFilterState();
-  /**
-   * ROI-filter data channel, created lazily by {@link ensureRoiFilterChannel}
-   * only when a zarr-vectors spatially-indexed skeleton (tract) source loads;
-   * left undefined otherwise, so the skeleton shader's ROI tier stays inert for
-   * every other segmentation layer. Mirror the persisted {@link roiFilter}
-   * (URL truth) into non-persisted watchables the render layer / backend read:
-   * `roiGroups`/`roiFilterActive` feed the worker's passing-set recompute,
-   * `roiFilterActive`/`roiGhostAlpha` drive the shader uniforms, and the worker
-   * mutates `roiPassingSegments` to say which streamlines survive.
-   */
-  roiPassingSegments?: Uint64Set;
-  roiFilterActive?: WatchableValue<boolean>;
-  roiGhostAlpha?: WatchableValue<number>;
-  roiGroups?: WatchableValue<readonly RoiGroupConfig[]>;
-  /**
-   * Evaluate the given groups over the currently-resident chunks and return each
-   * group's passing object ids (WYSIWYG). Set once the tract render layer exists;
-   * the Export tab calls it to select streamlines by id rather than re-folding
-   * the whole level in the exporter. Positional: `result[i]` ↔ `groups[i]`.
-   */
-  computeRoiExportIds?: (
-    groups: readonly RoiGroupConfig[],
-  ) => Promise<bigint[][]>;
-  /**
-   * The per-vertex attribute names the geometry source loaded, in load order
-   * (the on-disk `vertex_attributes/<name>` directory names). The Filter tab
-   * offers these as filter targets; for a point cloud they are the ONLY tier it
-   * can offer, since that kind has no per-object attributes at all. Set when a
-   * zarr-vectors geometry source activates.
-   */
-  roiVertexAttributeNames?: readonly string[];
-  /**
-   * On-disk dtypes parallel to {@link roiVertexAttributeNames}. The Filter tab
-   * needs them to tell a FLAG from a measurement when the loaded chunks happen
-   * to show only one of the flag's two values.
-   */
-  roiVertexAttributeDtypes?: readonly string[];
-  /**
-   * Measure the named per-vertex attributes over the currently-resident chunks.
-   * The values live in the worker (the frontend holds them as opaque packed
-   * texture bytes), so a range for a slider has to be asked for. Positional:
-   * `result[i]` ↔ `names[i]`.
-   */
-  computeRoiVertexAttrStats?: (
-    names: readonly string[],
-  ) => Promise<VertexAttrStats[]>;
-  /**
-   * Whether this layer's geometry is exportable as tracts. The Export tab's two
-   * formats are streamline-shaped, so a point-cloud or mesh store gets the
-   * Filter tab without it.
-   */
-  roiSupportsTractExport?: boolean;
-  /**
-   * What the filterable geometry draws as, so the Filter tab can name what it
-   * is selecting: a point cloud's passing ids are single cells, not tracts.
-   */
-  roiGeometryPrimitive?: "points" | "lines" | "triangles";
-  /**
-   * The pass-2 (object-keyed, high-detail) skeleton source. Its resident chunks
-   * hold whole tracts' geometry in frontend memory, which the Export tab reads
-   * directly for the fast in-browser TRK export (no store re-read). Present only
-   * once the tract layer's high-detail source is created.
-   */
-  roiHighDetailSkeletonSource?: SkeletonSource;
-  roiSegmentColors?: Uint64Map;
-  roiColorByGroup?: WatchableValue<boolean>;
-  /**
-   * Per-object numeric attribute columns (from the loaded segment-property map),
-   * shipped to the worker so a group's length filter and object-attribute colour
-   * can be evaluated. Keyed by attribute name; rebuilt when the property map
-   * changes. `undefined`/empty until such a map loads.
-   */
-  roiObjectAttrColumns?: WatchableValue<
-    ReadonlyMap<string, RoiObjectAttrColumn>
-  >;
-  /**
-   * Dense anatomical label grid built from {@link roiLabelLayer}, shipped to the
-   * worker so `labelMask` ROIs can be sampled per streamline vertex. Rebuilt when
-   * the linked parcellation changes or finishes loading; undefined when none is
-   * linked or it is still loading.
-   */
-  roiLabelField?: WatchableValue<RoiLabelField | undefined>;
-  /**
-   * Frontend-only per-object value map (id -> normalised attribute value, 16-bit
-   * packed) for the background length filter + flat colour-by-attribute shader
-   * tier, plus the resolved uniforms in {@link roiBackground}. Not sent to the
-   * worker (the shader reads it directly).
-   */
-  roiObjectValues?: Uint64Map;
-  roiBackground?: WatchableValue<RoiBackgroundUniforms | undefined>;
-  /**
-   * Shared set of object ids the pass-1 backend fills = union of visible +
-   * high-detail groups' passing tracts. Drives the object-keyed pass-2 render
-   * layer (its dedicated visible set), which redraws those at full detail.
-   */
-  roiHighDetailSegments?: Uint64Set;
   spatialSkeletonGridLevel2d = new TrackableValue<number>(
     0,
     verifyNonnegativeInt,
@@ -929,97 +886,6 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
   // controlled behavior for layers that don't want this (CATMAID).
   autoSpatialSkeletonGridLevel2d = new TrackableBoolean(false, false);
   autoSpatialSkeletonGridLevel3d = new TrackableBoolean(false, false);
-  /**
-   * Drop the memory ceiling on grid-level selection.
-   *
-   * The ceiling refuses any level whose *fully resident* estimate exceeds the
-   * GPU budget -- for a whole-brain tractogram that is level 0 at ~4 GB against
-   * 1 GB. But only chunks in view are ever fetched, so a tight crop would fetch
-   * a small fraction of that and is refused for a cost it will never pay. Until
-   * the estimate is view-scoped (which needs a per-level in-view chunk count the
-   * store does not stamp), this lets the user take that judgement themselves.
-   *
-   * Off by default: with it on, a wide view of a dense level really can exhaust
-   * GPU memory, which is the failure the ceiling exists to prevent.
-   */
-  ignoreSpatialSkeletonMemoryCeiling = new TrackableBoolean(false, false);
-  /**
-   * What the memory left over by the pyramid level being drawn is spent on.
-   * See {@link SpatialSkeletonDetailFocus} for why a tractogram wants a
-   * different answer here than an image pyramid does.
-   *
-   * Defaults to OBJECT: every source that reaches this code publishes per-level
-   * costs, which today means zarr-vectors geometry, whose objects are long
-   * enough that the local answer returns them in pieces.
-   */
-  // Explicit type argument: without it the initialiser narrows the generic to
-  // the literal `SpatialSkeletonDetailFocus.OBJECT`, so assigning any other
-  // member (see `refreshSpatialSkeletonAdmission`, which drops to LOCAL when
-  // the store cannot be budgeted per object) fails to typecheck.
-  spatialSkeletonDetailFocus = new TrackableEnum<SpatialSkeletonDetailFocus>(
-    SpatialSkeletonDetailFocus,
-    SpatialSkeletonDetailFocus.OBJECT,
-  );
-  /**
-   * Whether the focus above was CHOSEN -- restored from the layer's JSON or
-   * picked in the UI -- as opposed to being the class default.
-   *
-   * The default is OBJECT because that is what a tractogram wants, and a
-   * tractogram is what the mode was built for. A store that cannot be budgeted
-   * per object still honours object focus (one level everywhere, its whole
-   * volume resident), but the sizing behind that is "the whole level fits the
-   * GPU budget" -- which assumes the layer has the budget to itself. Three
-   * geometry layers over one volume each assume that, and together they thrash:
-   * every layer's whole level is requested, nothing stays resident, and the
-   * viewer draws nothing at all. So on those stores the DEFAULT reverts to
-   * LOCAL, once, when the source reports the capability
-   * ({@link updateSpatialSkeletonSourceState}) -- and an explicit choice is
-   * left alone.
-   */
-  spatialSkeletonDetailFocusExplicit = false;
-  /** Guards our own writes to the focus, so they do not read as a choice. */
-  private applyingDefaultDetailFocus = false;
-
-  /**
-   * Set the focus without marking it as the user's choice.
-   *
-   * Returns true if the value moved.
-   */
-  applyDefaultSpatialSkeletonDetailFocus(value: SpatialSkeletonDetailFocus) {
-    if (this.spatialSkeletonDetailFocus.value === value) return false;
-    this.applyingDefaultDetailFocus = true;
-    try {
-      this.spatialSkeletonDetailFocus.value = value;
-    } finally {
-      this.applyingDefaultDetailFocus = false;
-    }
-    return true;
-  }
-
-  /** See {@link spatialSkeletonDetailFocusExplicit}. */
-  noteSpatialSkeletonDetailFocusChanged() {
-    if (!this.applyingDefaultDetailFocus) {
-      this.spatialSkeletonDetailFocusExplicit = true;
-    }
-  }
-
-  /**
-   * Bytes the level being drawn leaves unspent: the budget minus its
-   * fully-resident estimate. Under OBJECT focus this is what buys whole
-   * objects; under LOCAL focus nothing reads it.
-   */
-  /**
-   * Share of the drawn level's NEW objects to decode, in [0, 1]. `1` means no
-   * rationing. Derived, never set by the user; see
-   * {@link refreshSpatialSkeletonAdmission}.
-   */
-  spatialSkeletonAdmissionFraction = new WatchableValue<number>(1);
-  /**
-   * Bytes ONE cell of each level costs on the GPU, coarsest-first. This is what
-   * makes LOCAL focus respond to zoom: the budget divided by the number of cells
-   * in view names the finest level each cell can afford.
-   */
-  spatialSkeletonPerCellCostBytes = new WatchableValue<number[]>([]);
   spatialSkeletonGridRenderScaleHistogram2d = new RenderScaleHistogram();
   spatialSkeletonGridRenderScaleHistogram3d = new RenderScaleHistogram();
   spatialSkeletonLod2d = new WatchableValue<number>(0);
@@ -1046,44 +912,8 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
     this.layer.moveToSegment(id);
   };
 
-  /**
-   * Publish the pyramid's levels, coarsest first, and choose one.
-   *
-   * `levelCostsBytes` (parallel to `gridSizes`) and `budgetBytes` opt a source
-   * into budget-driven selection: the finest level that fits is chosen, rather
-   * than the one closest to the camera-derived resolution target. That matters
-   * where levels differ in *how many complete objects* they hold rather than
-   * in resolution — detail-per-pixel then says nothing about whether a level
-   * will fit, and on a whole-brain tractogram the camera target asks for the
-   * finest level, ~10^8 vertices and several times the GPU budget. Sources
-   * that omit them keep the camera-driven behaviour.
-   */
-  /**
-   * Level chosen by memory budget, or `undefined` when the source did not opt
-   * in. While set, the camera-driven resolution target does not re-select:
-   * "the finest level that fits" and "the level matching the screen" are
-   * different questions, and the camera's answer would otherwise win every
-   * frame.
-   */
-  private spatialSkeletonBudgetLevel: number | undefined;
-
-  setSpatialSkeletonGridSizes(
-    gridSizes: SpatialSkeletonGridSize[],
-    levelCostsBytes?: number[],
-    budgetBytes?: number,
-    levelObjectCounts?: (number | undefined)[],
-    levelCellCounts?: number[],
-  ) {
-    const perCell =
-      levelCostsBytes !== undefined &&
-      levelCellCounts !== undefined &&
-      levelCellCounts.length === levelCostsBytes.length
-        ? levelCostsBytes.map((cost, k) =>
-            levelCellCounts[k] > 0 ? cost / levelCellCounts[k] : Number.NaN,
-          )
-        : [];
-    this.spatialSkeletonPerCellCostBytes.value = perCell;
-    const levels = buildSpatialSkeletonGridLevels(gridSizes, levelObjectCounts);
+  setSpatialSkeletonGridSizes(gridSizes: SpatialSkeletonGridSize[]) {
+    const levels = buildSpatialSkeletonGridLevels(gridSizes);
     const { origin: histogramOrigin, binSize: histogramBinSize } =
       getSpatialSkeletonGridHistogramConfig(levels);
     if (
@@ -1112,144 +942,16 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
     }
     this.spatialSkeletonGridLevels.value = levels;
     if (levels.length === 0) return;
-    // Kept so the ceiling can be recomputed later without re-activating the
-    // datasource -- see `updateSpatialSkeletonBudget`.
-    this.spatialSkeletonLevelCostsBytes =
-      levelCostsBytes !== undefined && levelCostsBytes.length === levels.length
-        ? levelCostsBytes.slice()
-        : undefined;
-    this.spatialSkeletonBudgetBytes = budgetBytes;
-    const budgeted = this.computeSpatialSkeletonBudgetLevel(budgetBytes);
-    this.spatialSkeletonBudgetLevel = budgeted;
-    // Initial selection SUBSTITUTES the ceiling, where later changes clamp to
-    // it (`applySpatialSkeletonResolutionTarget`). That difference is
-    // deliberate: the resolution targets still hold their default of 1 at
-    // activation, because under auto-LOD the render layer only starts deriving
-    // them from the camera once it has drawn a frame. Clamping against a
-    // not-yet-meaningful target would pick a level from a placeholder.
-    const target3dIndex =
-      budgeted ??
-      findClosestSpatialSkeletonGridLevelBySpacing(
-        levels,
-        this.spatialSkeletonGridResolutionTarget3d.value,
-      );
-    this.setSpatialSkeletonGridLevel("3d", target3dIndex);
-    const target2dIndex =
-      budgeted ??
-      findClosestSpatialSkeletonGridLevelBySpacing(
-        levels,
-        this.spatialSkeletonGridResolutionTarget2d.value,
-      );
-    this.setSpatialSkeletonGridLevel("2d", target2dIndex);
-    // Under OBJECT focus this immediately overrides both picks above with the
-    // level the memory budget actually implies.
-    this.refreshSpatialSkeletonAdmission();
-  }
-
-  /** Per-level fully-resident cost estimates, coarsest first; see the ctor. */
-  private spatialSkeletonLevelCostsBytes: number[] | undefined;
-  /**
-   * The tract source's own answer to "which whole objects fit in this many
-   * bytes", or `undefined` for a store that cannot be budgeted per object.
-   * Set when the subsource activates; see `computeObjectAdmission`.
-   */
-  spatialSkeletonComputeAdmission:
-    | ((budgetBytes: number) => ObjectAdmission | undefined)
-    | undefined;
-  /** Budget the ceiling was last computed against, so a toggle can reuse it. */
-  private spatialSkeletonBudgetBytes: number | undefined;
-
-  /**
-   * Estimated fully-resident bytes per level, **finest-first** (index == the
-   * export level number, 0 = full resolution); `[]` when the store carries no
-   * per-level metadata. Reuses the estimate already computed for the streamline
-   * budget -- the Export tab uses it to grey out levels a browser export cannot
-   * afford.
-   */
-  roiExportLevelCostsBytes(): number[] {
-    const costs = this.spatialSkeletonLevelCostsBytes; // coarsest-first
-    return costs === undefined ? [] : costs.slice().reverse();
-  }
-
-  private computeSpatialSkeletonBudgetLevel(
-    budgetBytes: number | undefined,
-  ): number | undefined {
-    // `undefined` means "no ceiling", which is exactly what the override wants:
-    // `applySpatialSkeletonResolutionTarget` then passes the requested level
-    // through unclamped.
-    if (this.ignoreSpatialSkeletonMemoryCeiling.value) return undefined;
-    const costs = this.spatialSkeletonLevelCostsBytes;
-    if (
-      costs === undefined ||
-      budgetBytes === undefined ||
-      !Number.isFinite(budgetBytes)
-    ) {
-      return undefined;
-    }
-    return selectSpatialSkeletonGridLevelByBudget(costs, budgetBytes);
-  }
-
-  /**
-   * Recompute the memory ceiling against a possibly-changed budget.
-   *
-   * The ceiling used to be decided exactly once, inside the datasource
-   * activation path, so raising the GPU memory limit changed nothing until the
-   * layer was reloaded -- the limit is user-editable, but the level it gated
-   * was not re-derived from it.
-   *
-   * Re-applies the current resolution targets rather than substituting the new
-   * ceiling: by the time this runs the targets are live (camera-derived under
-   * auto-LOD, or user-set), so clamping respects them while still refusing
-   * anything that does not fit.
-   */
-  /** Last GPU limit seen, so the auto budget can be recomputed on its own. */
-  /**
-   * The GPU byte limit the layer sizes against.
-   *
-   * A watchable, not a plain number: the render layers receive a SPREAD of this
-   * display state, which copies plain fields by value — so a number would freeze
-   * at its value on activation and stop tracking the user's memory limit, while
-   * a watchable is copied by reference and keeps reporting the live one.
-   */
-  spatialSkeletonGpuBudgetBytes = new WatchableValue<number>(0);
-
-  updateSpatialSkeletonBudget(budgetBytes?: number | undefined) {
-    if (this.spatialSkeletonGridLevels.value.length === 0) return;
-    if (budgetBytes !== undefined)
-      this.spatialSkeletonBudgetBytes = budgetBytes;
-    const next = this.computeSpatialSkeletonBudgetLevel(
-      this.spatialSkeletonBudgetBytes,
-    );
-    if (next !== this.spatialSkeletonBudgetLevel) {
-      this.spatialSkeletonBudgetLevel = next;
-      this.reapplySpatialSkeletonResolutionTargets();
-    }
-    // Always, even when the whole-level ceiling did not move: raising the GPU
-    // limit by less than a whole rung still buys more objects out of the next
-    // one, and that is the entire point of budgeting per object.
-    this.refreshSpatialSkeletonAdmission();
-  }
-
-  /**
-   * Re-run both views' resolution targets through the current ceiling.
-   *
-   * Needed wherever the CEILING moved without the target doing so -- a new
-   * budget level, or a detail-focus switch, which changes whether the
-   * whole-level ceiling applies at all (see
-   * {@link applySpatialSkeletonResolutionTarget}). Without this the level stays
-   * where the previous mode left it: on a store that cannot be budgeted per
-   * object, switching to OBJECT focus would keep a level chosen for the cells
-   * in view and then make its whole volume resident.
-   */
-  reapplySpatialSkeletonResolutionTargets() {
-    this.applySpatialSkeletonResolutionTarget(
-      "3d",
+    const target3dIndex = findClosestSpatialSkeletonGridLevelBySpacing(
+      levels,
       this.spatialSkeletonGridResolutionTarget3d.value,
     );
-    this.applySpatialSkeletonResolutionTarget(
-      "2d",
+    this.setSpatialSkeletonGridLevel("3d", target3dIndex);
+    const target2dIndex = findClosestSpatialSkeletonGridLevelBySpacing(
+      levels,
       this.spatialSkeletonGridResolutionTarget2d.value,
     );
+    this.setSpatialSkeletonGridLevel("2d", target2dIndex);
   }
 
   private setSpatialSkeletonGridLevel(kind: "2d" | "3d", index: number) {
@@ -1272,118 +974,10 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
     return clampedIndex;
   }
 
-  /**
-   * Re-derive the fill level for both views from the levels they now draw.
-   *
-   * Offered ONLY to a view sitting exactly on the memory ceiling. Below the
-   * ceiling the next level down fits whole, so there is nothing to ration and
-   * a partial load would be a worse picture than the one the user (or the
-   * camera) asked for; above it there is no ceiling in force at all, because
-   * the source published no costs or the user overrode it -- and in that case
-   * the finer level is already free to be selected outright.
-   */
-  /**
-   * Re-derive which objects the memory budget buys, and which level to read
-   * them from.
-   *
-   * This REPLACES level selection under OBJECT focus. The camera cannot answer
-   * the question: an object-sparsity pyramid's levels differ in how many whole
-   * tracts they hold, not in detail per pixel, so a resolution target saturates
-   * at "finest" over the entire useful zoom range and the level stops moving.
-   * What actually bounds the picture is memory, so memory chooses — the finest
-   * level whose objects fit, plus a rationed share of the level below it.
-   *
-   * Under LOCAL focus this is inert and the camera keeps deciding, per cell.
-   */
-  private refreshSpatialSkeletonAdmission() {
-    const levels = this.spatialSkeletonGridLevels.value;
-    const compute = this.spatialSkeletonComputeAdmission;
-    const budgetBytes = this.spatialSkeletonBudgetBytes;
-    const objectFocus =
-      this.spatialSkeletonDetailFocus.value ===
-      SpatialSkeletonDetailFocus.OBJECT;
-    // The user's override has to reach here too. It is consulted nowhere else
-    // than the whole-level ceiling, and OBJECT focus bypasses that path
-    // entirely -- so without this the checkbox is inert on exactly the layers it
-    // exists for. Under per-object budgeting "ignore the ceiling" means "spend
-    // as if memory were unlimited", which admits every object at the finest
-    // level: the same escape hatch, expressed in this mode's terms.
-    const effectiveBudget = this.ignoreSpatialSkeletonMemoryCeiling.value
-      ? Number.POSITIVE_INFINITY
-      : budgetBytes;
-    const admission =
-      objectFocus &&
-      compute !== undefined &&
-      effectiveBudget !== undefined &&
-      levels.length > 0
-        ? compute(effectiveBudget)
-        : undefined;
-    if (admission === undefined) {
-      // No per-object budgeting available (or not asked for): draw whole levels
-      // and leave the rationing off.
-      if (this.spatialSkeletonAdmissionFraction.value !== 1) {
-        this.spatialSkeletonAdmissionFraction.value = 1;
-      }
-      if (objectFocus) {
-        warnOnceAdmissionUnavailable(compute !== undefined);
-        // ...and that is the whole of it: the mode STAYS SELECTED.
-        //
-        // Object focus is two behaviours, and only one of them needs the store
-        // to carry per-object membership.
-        //
-        // The half that always works: one level everywhere instead of per-cell
-        // arbitration, and that level's WHOLE VOLUME resident rather than the
-        // frustum. That is what makes an object load as an object -- uniform
-        // detail across it, no cut-off where the finer chunks ran out, no decay
-        // into the visible piece as the camera turns -- and it is exactly what
-        // a mesh or point-cloud store wants. Level selection simply reverts to
-        // the camera under the whole-level ceiling (see
-        // {@link applySpatialSkeletonResolutionTarget}), which is the right
-        // ceiling here because the whole level really is loaded.
-        //
-        // The half that does not: drawing the UNION of every level with
-        // `gridIndex <= gridLevel` (in the draw list
-        // `SpatiallyIndexedSkeletonLayer.forEachVisibleChunkSlot` and in the
-        // worker's request set `selectScales`), plus rationing the finest one.
-        // That is sound only where the levels PARTITION the objects between
-        // them, as `admitObjects` in the zarr-vectors backend guarantees from
-        // `coarserMembership`; on a plain resolution pyramid -- every level a
-        // decimated copy of every object, `object_sparsity` 1.0 -- it draws the
-        // same object once per resident level, superimposed. Overlapping
-        // decimations of one surface sum on screen, which reads as additive
-        // rendering; it is duplicated geometry, not blending, so no opacity
-        // control affects it.
-        //
-        // So the union is gated at its own sites, on the same store property
-        // (`partitionsObjects`, published per source), and this branch no
-        // longer has to switch the user's mode off to keep it safe. It used
-        // to, which is why object focus could not be selected at all on a mesh
-        // or point-cloud layer: the control sprang back to LOCAL.
-      }
-      return;
-    }
-    // `loadLevel` counts from the finest level; a grid level counts from the
-    // coarsest (see `gridIndex` in the zarr-vectors datasource).
-    const gridLevel = levels.length - 1 - admission.loadLevel;
-    this.setSpatialSkeletonGridLevel("3d", gridLevel);
-    this.setSpatialSkeletonGridLevel("2d", gridLevel);
-    if (this.spatialSkeletonAdmissionFraction.value !== admission.fraction) {
-      this.spatialSkeletonAdmissionFraction.value = admission.fraction;
-    }
-  }
-
   linkedSegmentationGroup: LinkedLayerGroup;
   linkedSegmentationColorGroup: LinkedLayerGroup;
   originalSegmentationGroupState: SegmentationUserLayerGroupState;
   originalSegmentationColorGroupState: SegmentationUserLayerColorGroupState;
-
-  /**
-   * Reference to a segmentation (parcellation) layer whose anatomical labels can
-   * be toggled include/exclude to dissect the tracts (the streamline Filter tab's
-   * "By segmentation label" panel). Persisted so a chosen parcellation survives a
-   * reload. Undefined-name = no parcellation linked.
-   */
-  roiLabelLayer: LayerReference;
 
   segmentationGroupState: WatchableValueInterface<SegmentationUserLayerGroupState>;
   segmentationColorGroupState: WatchableValueInterface<SegmentationUserLayerColorGroupState>;
@@ -1392,10 +986,6 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
   hideSegmentZero: WatchableValueInterface<boolean>;
   segmentColorHash: TrackableValueInterface<number>;
   segmentStatedColors: WatchableValueInterface<Uint64Map>;
-  effectiveSegmentStatedColors: WatchableValueInterface<Uint64Map>;
-  private derivedSegmentStatedColors: Uint64Map;
-  private effectiveStatedColorsUsesLut = false;
-  private effectiveSegmentStatedColorsChanged = new Signal();
   tempSegmentStatedColors2d: WatchableValueInterface<Uint64Map>;
   segmentDefaultColor: WatchableValueInterface<vec3 | undefined>;
   tempSegmentDefaultColor2d: WatchableValueInterface<vec3 | vec4 | undefined>;
@@ -1785,10 +1375,6 @@ export class SegmentationUserLayer extends Base {
     this.displayState.spatialSkeletonNodeFilter.changed.add(
       this.specificationChanged.dispatch,
     );
-    this.displayState.roiFilter.changed.add(this.specificationChanged.dispatch);
-    this.displayState.roiLabelLayer.changed.add(
-      this.specificationChanged.dispatch,
-    );
     this.displayState.spatialSkeletonGridResolutionTarget2d.changed.add(
       this.specificationChanged.dispatch,
     );
@@ -1850,7 +1436,24 @@ export class SegmentationUserLayer extends Base {
       order: -50,
       getter: () => new SegmentDisplayTab(this),
     });
-    registerSpatialSkeletonTabs(this);
+    const hideSpatialSkeletonEditTab = this.registerDisposer(
+      makeCachedLazyDerivedWatchableValue(
+        (layers) =>
+          !layers.some(
+            (layer) =>
+              (layer instanceof PerspectiveViewSpatiallyIndexedSkeletonLayer ||
+                layer instanceof SliceViewPanelSpatiallyIndexedSkeletonLayer) &&
+              getSpatiallyIndexedSkeletonSource(layer.base) !== undefined,
+          ),
+        { changed: this.layersChanged, value: this.renderLayers },
+      ),
+    );
+    this.tabs.add("skeleton", {
+      label: "Skeleton",
+      order: -45,
+      getter: () => new SpatialSkeletonEditTab(this),
+      hidden: hideSpatialSkeletonEditTab,
+    });
     const hideGraphTab = this.registerDisposer(
       makeCachedDerivedWatchableValue(
         (x) => x === undefined,
@@ -1863,39 +1466,6 @@ export class SegmentationUserLayer extends Base {
       getter: () => new SegmentationGraphSourceTab(this),
       hidden: hideGraphTab,
     });
-    // The memory ceiling on spatially-indexed skeleton levels is derived from
-    // the GPU capacity, which the user can edit at runtime. Without this the
-    // ceiling kept whatever value it was given during datasource activation, so
-    // raising the limit appeared to do nothing to a tractogram.
-    {
-      const gpuLimit =
-        this.manager.chunkManager.chunkQueueManager.capacities.gpuMemory
-          .sizeLimit;
-      const reapplyBudgets = () => {
-        this.displayState.spatialSkeletonGpuBudgetBytes.value = gpuLimit.value;
-        this.displayState.updateSpatialSkeletonBudget(gpuLimit.value);
-      };
-      this.displayState.spatialSkeletonGpuBudgetBytes.value = gpuLimit.value;
-      this.registerDisposer(gpuLimit.changed.add(reapplyBudgets));
-      this.registerDisposer(
-        this.displayState.ignoreSpatialSkeletonMemoryCeiling.changed.add(() =>
-          this.displayState.updateSpatialSkeletonBudget(),
-        ),
-      );
-      // Switching focus moves the same leftover from one consumer to the other,
-      // so both have to be re-derived: the spatial fill level and the whole-
-      // object set are each cleared or repopulated by this pass.
-      this.registerDisposer(
-        this.displayState.spatialSkeletonDetailFocus.changed.add(() => {
-          this.displayState.noteSpatialSkeletonDetailFocusChanged();
-          this.displayState.updateSpatialSkeletonBudget();
-          // ...and the level itself, which the budget pass re-derives only when
-          // the budget LEVEL moved. Switching focus does not move it; it moves
-          // which ceiling applies to it.
-          this.displayState.reapplySpatialSkeletonResolutionTargets();
-        }),
-      );
-    }
     this.tabs.default = "rendering";
     this.updateSpatialSkeletonChunkLoadState();
     this.updateSpatialSkeletonSourceState();
@@ -1947,38 +1517,6 @@ export class SegmentationUserLayer extends Base {
           (x) =>
             x instanceof PerspectiveViewSpatiallyIndexedSkeletonLayer ||
             x instanceof SliceViewPanelSpatiallyIndexedSkeletonLayer,
-        ),
-      { changed: this.layersChanged, value: this.renderLayers },
-    ),
-  );
-
-  /**
-   * Whether any drawn geometry is made of LINE segments.
-   *
-   * Distinct from {@link hasSkeletonsLayer}, which is true for anything drawn by
-   * the skeleton render layers -- including a zarr-vectors point cloud or mesh,
-   * which go through the same class but draw circles and triangles. The
-   * lines-versus-points preference is meaningless for those, so the control that
-   * offers it is gated on this instead.
-   */
-  readonly hasLineGeometryLayer = this.registerDisposer(
-    makeCachedLazyDerivedWatchableValue(
-      (layers) =>
-        layers.some(
-          (x) =>
-            x instanceof PerspectiveViewSkeletonLayer ||
-            (x instanceof PerspectiveViewSpatiallyIndexedSkeletonLayer &&
-              x.base.geometryPrimitive === "lines"),
-        ),
-      { changed: this.layersChanged, value: this.renderLayers },
-    ),
-  );
-
-  readonly hasMeshLayer = this.registerDisposer(
-    makeCachedLazyDerivedWatchableValue(
-      (layers) =>
-        layers.some(
-          (x) => x instanceof MeshLayer || x instanceof MultiscaleMeshLayer,
         ),
       { changed: this.layersChanged, value: this.renderLayers },
     ),
@@ -2224,342 +1762,6 @@ export class SegmentationUserLayer extends Base {
     this.spatialSkeletonState.markNodeDataChanged(options);
   }
 
-  /**
-   * Evaluate `groups` over the tract render layer's currently-resident chunks and
-   * return each group's passing object ids (WYSIWYG). Backs the
-   * `computeRoiExportIds` display-state callback the Export tab calls; the lookup
-   * is done here (not captured at channel-creation) because the render layer is
-   * created after the ROI channel. Rejects if no tract render layer exists yet.
-   */
-  private async computeRoiExportIds(
-    groups: readonly RoiGroupConfig[],
-  ): Promise<bigint[][]> {
-    for (const renderLayer of this.renderLayers) {
-      if (
-        renderLayer instanceof PerspectiveViewSpatiallyIndexedSkeletonLayer ||
-        renderLayer instanceof SliceViewPanelSpatiallyIndexedSkeletonLayer
-      ) {
-        return renderLayer.base.computeRoiExportIds(groups);
-      }
-    }
-    throw new Error(
-      "This layer's tract geometry is not ready yet — wait for it to load, " +
-        "then export.",
-    );
-  }
-
-  /**
-   * Measure the named per-vertex attributes over the geometry render layer's
-   * resident chunks. Backs the `computeRoiVertexAttrStats` display-state
-   * callback the Filter tab calls before it can draw a control for an
-   * attribute; the render-layer lookup is done here, not captured at
-   * channel-creation, because the render layer is created after the ROI
-   * channel. Rejects while no geometry render layer exists.
-   */
-  private async computeRoiVertexAttrStats(
-    names: readonly string[],
-  ): Promise<VertexAttrStats[]> {
-    for (const renderLayer of this.renderLayers) {
-      if (
-        renderLayer instanceof PerspectiveViewSpatiallyIndexedSkeletonLayer ||
-        renderLayer instanceof SliceViewPanelSpatiallyIndexedSkeletonLayer
-      ) {
-        return renderLayer.base.computeRoiVertexAttrStats(names);
-      }
-    }
-    throw new Error(
-      "This layer's geometry is not ready yet — wait for it to load.",
-    );
-  }
-
-  /**
-   * Create the ROI streamline-filter data channel once, on first sight of a
-   * zarr-vectors spatially-indexed (tract) source. Idempotent — later calls
-   * return immediately.
-   *
-   * Bridges the persisted {@link RoiFilterState} (URL truth) to the render
-   * layer / worker: `roiGroups`, `roiFilterActive`, and `roiGhostAlpha` mirror
-   * it into plain watchables (the render layer wraps the first two as shared
-   * objects for the worker's passing-set recompute, and the shader reads
-   * active/ghostAlpha as uniforms); `roiPassingSegments` is the shared set the
-   * worker fills with the ids that survive the filter and the shader ghosts the
-   * rest against. All four are disposed with the layer.
-   */
-  private ensureRoiFilterChannel() {
-    const displayState = this.displayState;
-    if (displayState.roiPassingSegments !== undefined) return;
-    const rpc = this.manager.chunkManager.rpc!;
-    const roiFilter = displayState.roiFilter;
-    const passingSegments = this.registerDisposer(
-      Uint64Set.makeWithCounterpart(rpc),
-    );
-    const highDetailSegments = this.registerDisposer(
-      Uint64Set.makeWithCounterpart(rpc),
-    );
-    // Effective-active: the shader ghosts non-passing streamlines only when the
-    // user has the filter on AND some visible group has an ROI. With no ROIs an
-    // empty passing set would otherwise ghost EVERY streamline (nothing is
-    // "passing"), whereas "no ROIs" means "no filter". Folding that in here
-    // keeps the case correct without the shader needing to know it.
-    const effectiveActive = () =>
-      roiFilter.active && roiFilter.hasVisibleRois();
-    const active = new WatchableValue<boolean>(effectiveActive());
-    const ghostAlpha = new WatchableValue<number>(roiFilter.ghostAlpha);
-    const groups = new WatchableValue<readonly RoiGroupConfig[]>(
-      buildRoiGroupConfigs(roiFilter),
-    );
-    // Push URL-truth changes into the non-persisted watchables. Each setter
-    // only dispatches when its value actually changed, so an unrelated edit
-    // (e.g. colour-by-group) does not needlessly re-trigger a worker recompute.
-    this.registerDisposer(
-      roiFilter.changed.add(() => {
-        active.value = effectiveActive();
-        ghostAlpha.value = roiFilter.ghostAlpha;
-        groups.value = buildRoiGroupConfigs(roiFilter);
-      }),
-    );
-    displayState.roiPassingSegments = passingSegments;
-    displayState.roiFilterActive = active;
-    displayState.roiGhostAlpha = ghostAlpha;
-    displayState.roiGroups = groups;
-    displayState.roiHighDetailSegments = highDetailSegments;
-    // The Export tab reaches the (later-created) tract render layer through this
-    // callback. Lazy: the render layer does not exist yet, so the lookup runs at
-    // call time. Set on the real display state (not the per-activation spread the
-    // render layers receive), which is the one the tab holds.
-    displayState.computeRoiExportIds = (roiGroups) =>
-      this.computeRoiExportIds(roiGroups);
-
-    // Colour-by-group: the worker fills `segmentColors` (id -> packed group
-    // colour) for passing tracts, which a dedicated ROI colour shader tier reads
-    // DIRECTLY to override the streamline's directional RGB. It deliberately
-    // does NOT touch the user-facing `segmentStatedColors` map (reusing that
-    // clobbers manual segment colours and bakes the materialised colour set into
-    // the URL). `colorByGroup` drives the tier's on/off shader uniform.
-    const segmentColors = this.registerDisposer(
-      Uint64Map.makeWithCounterpart(rpc),
-    );
-    const colorByGroup = new WatchableValue<boolean>(roiFilter.colorByGroup);
-    this.registerDisposer(
-      roiFilter.changed.add(() => {
-        colorByGroup.value = roiFilter.colorByGroup;
-      }),
-    );
-    displayState.roiSegmentColors = segmentColors;
-    displayState.roiColorByGroup = colorByGroup;
-
-    // Per-object numeric attributes (length, …) for the worker's length filter
-    // and object-attribute colouring. Rebuilt whenever the segment-property map
-    // changes (e.g. a group switch or the store finishing its load).
-    const objectAttrColumns = new WatchableValue<
-      ReadonlyMap<string, RoiObjectAttrColumn>
-    >(buildObjectAttrColumns(displayState.segmentPropertyMap.value));
-    this.registerDisposer(
-      displayState.segmentPropertyMap.changed.add(() => {
-        objectAttrColumns.value = buildObjectAttrColumns(
-          displayState.segmentPropertyMap.value,
-        );
-      }),
-    );
-    displayState.roiObjectAttrColumns = objectAttrColumns;
-
-    // Dense anatomical label grid, built from the linked parcellation layer
-    // ({@link roiLabelLayer}) and shipped to the worker for `labelMask` ROIs.
-    // Rebuilt whenever the reference changes or the parcellation finishes
-    // loading; an in-flight build is aborted so a rapid re-link cannot land a
-    // stale grid. Kept undefined (label ROIs then select nothing) until ready.
-    const roiLabelField = new WatchableValue<RoiLabelField | undefined>(
-      undefined,
-    );
-    displayState.roiLabelField = roiLabelField;
-    let labelFieldBuild: AbortController | undefined;
-    let lastLabelLayerName: string | undefined;
-    const rebuildLabelField = (force = false) => {
-      const ref = displayState.roiLabelLayer;
-      const managed = ref.layer;
-      const parcellation = managed?.layer;
-      if (
-        !(parcellation instanceof SegmentationUserLayer) ||
-        parcellation === this ||
-        managed === undefined
-      ) {
-        labelFieldBuild?.abort();
-        labelFieldBuild = undefined;
-        lastLabelLayerName = undefined;
-        if (roiLabelField.value !== undefined) roiLabelField.value = undefined;
-        return;
-      }
-      // The layersChanged signal fires often; only rebuild when the referenced
-      // parcellation actually changed, or it just became ready (force), or we
-      // have not built for it yet.
-      if (!force && managed.name === lastLabelLayerName) return;
-      if (!managed.isReady()) return;
-      lastLabelLayerName = managed.name;
-      labelFieldBuild?.abort();
-      const abort = (labelFieldBuild = new AbortController());
-      const globalNames = this.manager.root.coordinateSpace.value.names ?? [];
-      buildRoiLabelField(parcellation, globalNames, { signal: abort.signal })
-        .then((field) => {
-          if (!abort.signal.aborted) roiLabelField.value = field;
-        })
-        .catch((e) => {
-          if (!abort.signal.aborted) {
-            console.error(
-              "ROI label filter: parcellation grid build failed",
-              e,
-            );
-          }
-        });
-    };
-    this.registerDisposer(
-      displayState.roiLabelLayer.changed.add(() => {
-        // A fresh reference: forget the last-built name so a re-link to a
-        // now-ready layer rebuilds even if the name coincides.
-        lastLabelLayerName = undefined;
-        rebuildLabelField();
-      }),
-    );
-    // Catch the parcellation transitioning to ready after the reference was set
-    // (e.g. restored from the URL before its data loaded).
-    this.registerDisposer(
-      this.manager.rootLayers.layersChanged.add(() => rebuildLabelField(true)),
-    );
-    this.registerDisposer(() => labelFieldBuild?.abort());
-    rebuildLabelField();
-
-    // Background (whole-tractogram) length filter + flat colour-by-attribute: a
-    // frontend-only per-object value map (id -> packed normalised values) read
-    // directly by the shader, plus the resolved uniforms.
-    //
-    // ID-space caveat (shared with buildObjectAttrColumns): the keys are the
-    // segment-property map's ids (dense object index). For a store with
-    // `object_index_convention: "identity"` they equal the streamline segment
-    // ids the shader looks up; a `"standard"` store would need re-keying through
-    // `object_attributes/segment_id` first, else the tier silently no-ops.
-    const roiObjectValues = this.registerDisposer(new Uint64Map());
-    const roiBackground = new WatchableValue<RoiBackgroundUniforms | undefined>(
-      undefined,
-    );
-    // Each packed value holds TWO normalised attributes: the length-filter
-    // attribute in the low 16 bits and the colour attribute in the high 16, so a
-    // length filter on one attribute and colour-by another coexist in one map.
-    let lastKey = "";
-    let lastPropMap: PreprocessedSegmentPropertyMap | undefined;
-    const enc16 = (v: number, min: number, span: number) => {
-      const t = span > 0 ? (Number(v) - min) / span : 0;
-      return Math.max(0, Math.min(65535, Math.round(t * 65535)));
-    };
-    const norm01 = (v: number, min: number, span: number) =>
-      span > 0 ? Math.max(0, Math.min(1, (v - min) / span)) : 0;
-    const refreshBackground = () => {
-      const propMap = displayState.segmentPropertyMap.value;
-      const bg = roiFilter.backgroundColorBy;
-      const lf = roiFilter.backgroundLengthFilter;
-      const num = propMap?.numericalProperties ?? [];
-      const lengthProp =
-        lf !== undefined ? num.find((p) => p.id === lf.name) : undefined;
-      const colorProp =
-        bg.kind === "objectAttr"
-          ? num.find((p) => p.id === bg.name)
-          : undefined;
-      if (lengthProp === undefined && colorProp === undefined) {
-        lastKey = "";
-        lastPropMap = undefined;
-        if (roiObjectValues.size !== 0) roiObjectValues.clear();
-        roiBackground.value = undefined;
-        return;
-      }
-      const lMin = lengthProp !== undefined ? Number(lengthProp.bounds[0]) : 0;
-      const lMax = lengthProp !== undefined ? Number(lengthProp.bounds[1]) : 1;
-      const cMin = colorProp !== undefined ? Number(colorProp.bounds[0]) : 0;
-      const cMax = colorProp !== undefined ? Number(colorProp.bounds[1]) : 1;
-      const key = `${lengthProp?.id ?? ""}:${lMin}:${lMax}|${colorProp?.id ?? ""}:${cMin}:${cMax}`;
-      // Rebuild the O(objects) map only when an attribute or its bounds change,
-      // or the property map object itself was reloaded (a source swap gives a
-      // fresh ids array even if name+bounds coincide). A range/mode tweak skips
-      // the rebuild and only updates the cheap uniforms below.
-      if (key !== lastKey || propMap !== lastPropMap) {
-        lastKey = key;
-        lastPropMap = propMap;
-        roiObjectValues.clear();
-        const ids = propMap!.segmentPropertyMap.inlineProperties!.ids;
-        const lVals = lengthProp?.values as ArrayLike<number> | undefined;
-        const cVals = colorProp?.values as ArrayLike<number> | undefined;
-        const lSpan = lMax - lMin;
-        const cSpan = cMax - cMin;
-        for (let i = 0; i < ids.length; ++i) {
-          const lo16 = lVals !== undefined ? enc16(lVals[i], lMin, lSpan) : 0;
-          const hi16 = cVals !== undefined ? enc16(cVals[i], cMin, cSpan) : 0;
-          // BigInt shifts (not `<<`) — `65535 << 16` overflows JS's 32-bit
-          // signed int and would set the value negative.
-          roiObjectValues.set_(ids[i], BigInt(lo16) | (BigInt(hi16) << 16n));
-        }
-        // One coalesced change signal instead of one per object.
-        roiObjectValues.changed.dispatch(null, true);
-      }
-      roiBackground.value = {
-        lengthActive: lf !== undefined && lengthProp !== undefined,
-        lo: lf !== undefined ? norm01(lf.min, lMin, lMax - lMin) : 0,
-        hi: lf !== undefined ? norm01(lf.max, lMin, lMax - lMin) : 1,
-        colorMode: bg.kind === "objectAttr" && colorProp !== undefined,
-      };
-    };
-    refreshBackground();
-    this.registerDisposer(roiFilter.changed.add(refreshBackground));
-    this.registerDisposer(
-      displayState.segmentPropertyMap.changed.add(refreshBackground),
-    );
-    displayState.roiObjectValues = roiObjectValues;
-    displayState.roiBackground = roiBackground;
-  }
-
-  /**
-   * Draw the ROI regions as annotation overlays on the tract subsource: box /
-   * plane ROIs as a coloured wireframe box, sphere ROIs as a coloured fill, each
-   * in its group's colour. Attached via the annotation mixin, so it renders in
-   * both the 2-d and 3-d views. The overlays mirror {@link RoiFilterState} and
-   * are read-only (placement/editing is via the Filter tab's sliders).
-   */
-  private addRoiOverlays(loadedSubsource: LoadedDataSubsource) {
-    const refCounted = loadedSubsource.activated;
-    if (refCounted === undefined) return;
-    const roiFilter = this.displayState.roiFilter;
-    const properties = new WatchableValue<AnnotationPropertySpec[]>([
-      {
-        identifier: "color",
-        type: "rgb",
-        default: packColor(vec3.fromValues(1, 1, 0)),
-        description: undefined,
-      },
-    ]);
-    const source = new LocalAnnotationSource(
-      loadedSubsource.loadedDataSource.transform,
-      properties,
-      [],
-    );
-    this.addLocalAnnotations(
-      loadedSubsource,
-      source,
-      RenderLayerRole.DEFAULT_ANNOTATION,
-    );
-    // The overlay colour/hide-2d shader lives on the layer-shared annotation
-    // display state; restore whatever was there when the tract source goes away
-    // so it does not linger onto any other annotations the layer might gain.
-    const previousShader = this.annotationDisplayState.shader.value;
-    refCounted.registerDisposer(() => {
-      this.annotationDisplayState.shader.value = previousShader;
-    });
-    const refs: AnnotationReference[] = [];
-    const sync = () => {
-      this.annotationDisplayState.shader.value = roiFilter.hideOverlays2d
-        ? ROI_OVERLAY_SHADER_HIDE_2D
-        : ROI_OVERLAY_SHADER;
-      rebuildRoiAnnotations(source, roiFilter, refs);
-    };
-    refCounted.registerDisposer(roiFilter.changed.add(sync));
-    sync();
-  }
-
   activateDataSubsources(subsources: Iterable<LoadedDataSubsource>) {
     const updatedSegmentPropertyMaps: SegmentPropertyMap[] = [];
     const isGroupRoot =
@@ -2567,30 +1769,10 @@ export class SegmentationUserLayer extends Base {
     let updatedGraph: SegmentationGraphSource | undefined;
     let hasVolume = false;
     let spatialSkeletonGridSizes: SpatialSkeletonGridSize[] | undefined;
-    let spatialSkeletonLevelCostsBytes: number[] | undefined;
-    let spatialSkeletonLevelObjectCounts: (number | undefined)[] | undefined;
-    let spatialSkeletonLevelCellCounts: number[] | undefined;
-    let spatialSkeletonBudgetBytes: number | undefined;
-    // A datasource-preferred default shader, and whether any subsource would be
-    // One entry per skeleton subsource: the shader it nominates as the layer
-    // default, or `undefined` for no opinion. Resolved after the loop, once
-    // every subsource has voted -- see `resolveSkeletonDefaultShader`.
-    const skeletonShaderCandidates: (string | undefined)[] = [];
     for (const loadedSubsource of subsources) {
       if (this.addStaticAnnotations(loadedSubsource)) continue;
-      const {
-        volume,
-        mesh,
-        zarrVectors,
-        segmentPropertyMap,
-        segmentationGraph,
-        local,
-      } = loadedSubsource.subsourceEntry.subsource;
-      // The two slots are distinct in the data model -- a zarr-vectors store is
-      // not a `MeshSource` -- but they resolve to the same render layers here,
-      // chosen by source class below. Binding them together keeps one activation
-      // path rather than two copies that would drift apart.
-      const geometry = mesh ?? zarrVectors;
+      const { volume, mesh, segmentPropertyMap, segmentationGraph, local } =
+        loadedSubsource.subsourceEntry.subsource;
       if (volume instanceof MultiscaleVolumeChunkSource) {
         switch (volume.dataType) {
           case DataType.FLOAT32:
@@ -2613,8 +1795,8 @@ export class SegmentationUserLayer extends Base {
             ),
           this.displayState.segmentationGroupState.value,
         );
-      } else if (geometry !== undefined) {
-        if (geometry instanceof MultiscaleSpatiallyIndexedSkeletonSource) {
+      } else if (mesh !== undefined) {
+        if (mesh instanceof MultiscaleSpatiallyIndexedSkeletonSource) {
           // Collect grid metadata outside `activate`, since `activate` is a no-op
           // when guard values are unchanged and may skip the callback.
           // Compose the live render-layer transform (reflects any output
@@ -2642,149 +1824,29 @@ export class SegmentationUserLayer extends Base {
             );
           }
           spatialSkeletonGridSizes =
-            geometry.getSpatialSkeletonGridSizes(liveScale);
-          // A source that can estimate what each level costs opts into
-          // budget-driven selection; see `setSpatialSkeletonGridSizes`.
-          const costs = (
-            geometry as {
-              getSpatialSkeletonLevelCostsBytes?: () => number[];
-            }
-          ).getSpatialSkeletonLevelCostsBytes?.();
-          if (costs !== undefined) {
-            spatialSkeletonLevelCostsBytes = costs;
-            // The whole GPU pool. The object-keyed pass draws from the same
-            // one, but it is sized from what the level chosen here LEAVES (see
-            // `refreshSpatialSkeletonObjectFill`), so the two cannot outbid
-            // each other and no share needs reserving up front.
-            spatialSkeletonBudgetBytes =
-              this.manager.chunkManager.chunkQueueManager.capacities.gpuMemory
-                .sizeLimit.value;
-          }
-          // Objects per level, when the source can say. Sizes the resolution
-          // histogram's bars by how many streamlines each level holds, which is
-          // what a user means by "how big is this level".
-          spatialSkeletonLevelObjectCounts = (
-            geometry as {
-              getSpatialSkeletonLevelObjectCounts?: () => (
-                | number
-                | undefined
-              )[];
-            }
-          ).getSpatialSkeletonLevelObjectCounts?.();
-          // Cells per level, so a whole-level cost becomes a per-cell one.
-          spatialSkeletonLevelCellCounts = (
-            geometry as {
-              getSpatialSkeletonLevelCellCounts?: () => number[];
-            }
-          ).getSpatialSkeletonLevelCellCounts?.();
-          // How this store answers "which whole objects fit in N bytes". Only a
-          // source with per-level object membership can; the rest keep
-          // whole-level selection.
-          const objectSource = geometry as {
-            computeObjectAdmission?: (b: number) => ObjectAdmission | undefined;
-            canBudgetPerObject?: boolean;
-          };
-          // Gate on the source's actual CAPABILITY, not on the method existing:
-          // a store missing per-level object membership has the method but
-          // always answers `undefined`, and installing the closure anyway
-          // suppresses whole-level selection without providing a per-object
-          // replacement. `=== false` so a source that does not declare the
-          // capability at all keeps the previous behaviour.
-          this.displayState.spatialSkeletonComputeAdmission =
-            objectSource.computeObjectAdmission === undefined ||
-            objectSource.canBudgetPerObject === false
-              ? undefined
-              : (budgetBytes: number) =>
-                  objectSource.computeObjectAdmission!(budgetBytes);
-          // ...and where it cannot, object focus stops being the DEFAULT.
-          //
-          // It remains selectable, and doing so gets the half of it that needs
-          // no per-object membership. But defaulting to it is wrong on a
-          // resolution pyramid: sizing "one level everywhere, whole volume
-          // resident" against the whole-level ceiling assumes the layer owns
-          // the GPU budget, and the mesh/point/skeleton stores this applies to
-          // are exactly the ones loaded three-at-a-time over one volume. See
-          // {@link SegmentationUserLayerDisplayState.spatialSkeletonDetailFocusExplicit}.
-          if (
-            this.displayState.spatialSkeletonComputeAdmission === undefined &&
-            !this.displayState.spatialSkeletonDetailFocusExplicit
-          ) {
-            this.displayState.applyDefaultSpatialSkeletonDetailFocus(
-              SpatialSkeletonDetailFocus.LOCAL,
-            );
-          }
-          skeletonShaderCandidates.push(geometry.defaultFragmentMain);
-        } else if (
-          geometry !== undefined &&
-          !(
-            geometry instanceof MeshSource ||
-            geometry instanceof MultiscaleMeshSource
-          )
-        ) {
-          // Anything else in the `geometry` slot that is not a geometry is drawn by the
-          // plain `SkeletonLayer` and shares this layer's skeleton shader, so
-          // it gets a vote. Meshes have their own shader and are not consulted.
-          skeletonShaderCandidates.push(
-            (geometry as { defaultFragmentMain?: string }).defaultFragmentMain,
-          );
+            mesh.getSpatialSkeletonGridSizes(liveScale);
         }
         loadedSubsource.activate(() => {
-          // A tract source that opts into the ROI streamline filter enables the
-          // data channel. Gate on the source capability, NOT the shared
-          // spatially-indexed skeleton base class: other datasources (e.g.
-          // CATMAID) use the same base but emit no per-vertex segment column, so
-          // their passing set could never be populated and the filter would
-          // ghost every streamline. Create the channel on the real display state
-          // *before* the spread below copies it into the per-activation display
-          // state the render layers receive (which is what lights up the shader).
-          if (
-            (geometry as { supportsRoiStreamlineFilter?: boolean })
-              .supportsRoiStreamlineFilter === true
-          ) {
-            this.ensureRoiFilterChannel();
-            this.addRoiOverlays(loadedSubsource);
-            // What the Filter tab can offer for THIS store: its loaded
-            // per-vertex attribute columns (the only filterable tier a point
-            // cloud has), and whether the tract export applies at all.
-            const filterable = geometry as {
-              vertexAttributeNames?: readonly string[];
-              vertexAttributeDtypes?: readonly string[];
-              supportsTractExport?: boolean;
-              geometryPrimitive?: "points" | "lines" | "triangles";
-            };
-            this.displayState.roiVertexAttributeNames =
-              filterable.vertexAttributeNames;
-            this.displayState.roiVertexAttributeDtypes =
-              filterable.vertexAttributeDtypes;
-            this.displayState.roiSupportsTractExport =
-              filterable.supportsTractExport === true;
-            this.displayState.roiGeometryPrimitive =
-              filterable.geometryPrimitive;
-            this.displayState.computeRoiVertexAttrStats = (names) =>
-              this.computeRoiVertexAttrStats(names);
-          }
           const displayState = {
             ...this.displayState,
             transform: loadedSubsource.getRenderLayerTransform(),
             localPosition: this.localPosition,
           };
-          if (geometry instanceof MeshSource) {
+          if (mesh instanceof MeshSource) {
             loadedSubsource.addRenderLayer(
-              new MeshLayer(this.manager.chunkManager, geometry, displayState),
+              new MeshLayer(this.manager.chunkManager, mesh, displayState),
             );
-          } else if (geometry instanceof MultiscaleMeshSource) {
+          } else if (mesh instanceof MultiscaleMeshSource) {
             loadedSubsource.addRenderLayer(
               new MultiscaleMeshLayer(
                 this.manager.chunkManager,
-                geometry,
+                mesh,
                 displayState,
               ),
             );
-          } else if (
-            geometry instanceof MultiscaleSpatiallyIndexedSkeletonSource
-          ) {
-            const perspectiveSources = geometry.getPerspectiveSources();
-            const slicePanelSources = geometry.getSliceViewPanelSources();
+          } else if (mesh instanceof MultiscaleSpatiallyIndexedSkeletonSource) {
+            const perspectiveSources = mesh.getPerspectiveSources();
+            const slicePanelSources = mesh.getSliceViewPanelSources();
             const sharedSpatialSkeletonSources =
               perspectiveSources.length > 0
                 ? perspectiveSources
@@ -2793,7 +1855,7 @@ export class SegmentationUserLayer extends Base {
             // emit several pyramid levels and want camera-driven level
             // switching (e.g. zarr-vectors) opt in here.  CATMAID
             // leaves it false, preserving manual-slider UX.
-            if (geometry.prefersAutoSpatialSkeletonGridLevel) {
+            if (mesh.prefersAutoSpatialSkeletonGridLevel) {
               this.displayState.autoSpatialSkeletonGridLevel3d.value = true;
               this.displayState.autoSpatialSkeletonGridLevel2d.value = true;
             }
@@ -2809,9 +1871,6 @@ export class SegmentationUserLayer extends Base {
                   lod: displayState.skeletonLod,
                   gridLevel2d: displayState.spatialSkeletonGridLevel2d,
                   lod2d: displayState.spatialSkeletonLod2d,
-                  detailFocus: displayState.spatialSkeletonDetailFocus,
-                  admissionFraction:
-                    displayState.spatialSkeletonAdmissionFraction,
                   sources2d: slicePanelSources,
                   selectedNodeId: this.selectedSpatialSkeletonNodeId,
                   pendingNodePositionVersion:
@@ -2840,10 +1899,10 @@ export class SegmentationUserLayer extends Base {
                 base.dispose();
               }
             }
-          } else if (geometry instanceof SpatiallyIndexedSkeletonSource) {
+          } else if (mesh instanceof SpatiallyIndexedSkeletonSource) {
             const base = new SpatiallyIndexedSkeletonLayer(
               this.manager.chunkManager,
-              geometry,
+              mesh,
               displayState,
               {
                 gridLevel: displayState.spatialSkeletonGridLevel3d,
@@ -2869,45 +1928,10 @@ export class SegmentationUserLayer extends Base {
               ),
             );
           } else {
-            // The zarr-vectors pass-2 source is the ROI filter's full-detail
-            // render layer: give it a DEDICATED visible set
-            // (roiHighDetailSegments) via a proxy group state, so it draws only
-            // the high-detail groups' tracts and never touches the user's
-            // selection. Consumers of the group state read fields
-            // (the 6 shared visible-segment objects, hideSegmentZero, …), never
-            // methods, so a spread proxy is safe; colouring uses the separate
-            // segmentationColorGroupState, which is unchanged.
-            let skeletonDisplayState = displayState;
-            const highDetail = displayState.roiHighDetailSegments;
-            if (
-              highDetail !== undefined &&
-              (geometry as { isRoiHighDetailSource?: boolean })
-                .isRoiHighDetailSource === true
-            ) {
-              const realGroupState =
-                this.displayState.segmentationGroupState.value;
-              // Structural proxy: all fields of the real group state, but with
-              // `visibleSegments` swapped. Cast back to the class type — the
-              // consumers only read the (present) fields, never call methods.
-              const proxyGroupState = {
-                ...realGroupState,
-                visibleSegments: highDetail,
-              } as unknown as SegmentationUserLayerGroupState;
-              skeletonDisplayState = {
-                ...displayState,
-                segmentationGroupState: new WatchableValue(proxyGroupState),
-              };
-              // Expose this pass-2 source so the Export tab can read whole tracts'
-              // geometry straight from its resident chunks (the fast in-browser
-              // TRK path) instead of re-reading the store. Set on the real display
-              // state (the one the tab holds), not the spread above.
-              this.displayState.roiHighDetailSkeletonSource =
-                geometry as SkeletonSource;
-            }
             const base = new SkeletonLayer(
               this.manager.chunkManager,
-              geometry,
-              skeletonDisplayState,
+              mesh,
+              displayState,
             );
             loadedSubsource.addRenderLayer(
               new PerspectiveViewSkeletonLayer(base.addRef()),
@@ -2994,63 +2018,11 @@ export class SegmentationUserLayer extends Base {
         updatedSegmentPropertyMaps,
       );
     this.displayState.originalSegmentationGroupState.graph.value = updatedGraph;
-    this.applySkeletonDefaultShader(
-      resolveSkeletonDefaultShader(skeletonShaderCandidates),
-    );
     this.displayState.setSpatialSkeletonGridSizes(
       spatialSkeletonGridSizes ?? [],
-      spatialSkeletonLevelCostsBytes,
-      spatialSkeletonBudgetBytes,
-      spatialSkeletonLevelObjectCounts,
-      spatialSkeletonLevelCellCounts,
     );
     this.displayState.hasVolume.value = hasVolume;
     this.updateSpatialSkeletonChunkLoadState();
-  }
-
-  /**
-   * Adopt a datasource's preferred skeleton shader as the layer's *default*.
-   *
-   * Applied as the default rather than as a value, for two reasons that both
-   * hinge on `TrackableValue.toJSON()` emitting only when
-   * `value !== defaultValue`:
-   *
-   *  - Setting only `value` would make the shader text serialise into every
-   *    saved link, and on reload it would come back as an *explicit user
-   *    shader* -- permanently pinning the layer to whatever the default
-   *    happened to be that day, and defeating any later improvement to it.
-   *  - Moving `defaultValue` too keeps `value === defaultValue`, so the state
-   *    stays clean, and "Reset" and a shader-less restore both land on the
-   *    datasource's shader rather than back on `emitDefault()`.
-   *
-   * A user's own shader still wins: the layer spec is restored synchronously,
-   * while this runs later from `activateDataSubsources` once the datasource has
-   * resolved, so `value` has already diverged from `defaultValue` and only the
-   * default moves (verified against a link carrying an explicit shader). The
-   * same guard makes re-activation non-clobbering.
-   *
-   * `sourceShader` is undefined when the layer's skeleton subsources have no
-   * agreed nomination -- no skeleton subsource, an abstaining one (CATMAID), or
-   * two that DISAGREE. In that case revert to the generic segment-coloured
-   * default ({@link DEFAULT_FRAGMENT_MAIN}) rather than leaving a previously
-   * installed datasource shader in place. The retract is load-bearing: subsources
-   * activate incrementally (a source whose `loadState` is still pending is
-   * skipped and this re-runs when it resolves), so a tangent-bearing tract source
-   * can activate ALONE first and install its `prop_tangent()` default, and then a
-   * no-tangent skeleton subsource loads and forces disagreement. Since the whole
-   * layer shares one `skeletonRenderingOptions.shader`, a stuck `prop_tangent()`
-   * default would fail to compile against the no-tangent subsource (blank tracts)
-   * -- so `undefined` must actively pull the default back to the generic one that
-   * compiles for every subsource. `defaultValue` is a plain field (no dispatch)
-   * and the `value` setter is change-guarded, so the common no-skeleton case
-   * (target already generic) is a true no-op.
-   */
-  private applySkeletonDefaultShader(sourceShader: string | undefined) {
-    const target = sourceShader ?? DEFAULT_FRAGMENT_MAIN;
-    const { shader } = this.displayState.skeletonRenderingOptions;
-    const untouched = shader.value === shader.defaultValue;
-    shader.defaultValue = target;
-    if (untouched) shader.value = target;
   }
 
   getLegacyDataSourceSpecifications(
@@ -3153,34 +2125,6 @@ export class SegmentationUserLayer extends Base {
       (value) =>
         this.displayState.spatialSkeletonNodeFilter.restoreState(value),
     );
-    verifyOptionalObjectProperty(
-      specification,
-      json_keys.ROI_FILTER_JSON_KEY,
-      (value) => this.displayState.roiFilter.restoreState(value),
-    );
-    verifyOptionalObjectProperty(
-      specification,
-      json_keys.ROI_LABEL_LAYER_JSON_KEY,
-      (value) => this.displayState.roiLabelLayer.restoreState(value),
-    );
-    verifyOptionalObjectProperty(
-      specification,
-      json_keys.IGNORE_SKELETON_MEMORY_CEILING_JSON_KEY,
-      (value) =>
-        this.displayState.ignoreSpatialSkeletonMemoryCeiling.restoreState(
-          value,
-        ),
-    );
-    verifyOptionalObjectProperty(
-      specification,
-      json_keys.SPATIAL_SKELETON_DETAIL_FOCUS_JSON_KEY,
-      (value) => {
-        this.displayState.spatialSkeletonDetailFocus.restoreState(value);
-        // A focus in the JSON is a choice, and outlives whatever the source
-        // turns out to support.
-        this.displayState.spatialSkeletonDetailFocusExplicit = true;
-      },
-    );
     this.displayState.spatialSkeletonGridResolutionTarget2d.restoreState(
       specification[json_keys.SKELETON_CROSS_SECTION_RENDER_SCALE_JSON_KEY],
     );
@@ -3260,13 +2204,6 @@ export class SegmentationUserLayer extends Base {
       this.displayState.spatialSkeletonNodeQuery.toJSON();
     x[json_keys.SPATIAL_SKELETON_NODE_FILTER_JSON_KEY] =
       this.displayState.spatialSkeletonNodeFilter.toJSON();
-    x[json_keys.ROI_FILTER_JSON_KEY] = this.displayState.roiFilter.toJSON();
-    x[json_keys.ROI_LABEL_LAYER_JSON_KEY] =
-      this.displayState.roiLabelLayer.toJSON();
-    x[json_keys.IGNORE_SKELETON_MEMORY_CEILING_JSON_KEY] =
-      this.displayState.ignoreSpatialSkeletonMemoryCeiling.toJSON();
-    x[json_keys.SPATIAL_SKELETON_DETAIL_FOCUS_JSON_KEY] =
-      this.displayState.spatialSkeletonDetailFocus.toJSON();
     x[json_keys.HIDDEN_OPACITY_3D_JSON_KEY] =
       this.displayState.hiddenObjectAlpha.toJSON();
     x[json_keys.SKELETON_CROSS_SECTION_RENDER_SCALE_JSON_KEY] =
@@ -3525,13 +2462,748 @@ export class SegmentationUserLayer extends Base {
     return true;
   }
 
+  private displaySpatialSkeletonSelection(
+    state: this["selectionState"],
+    parent: HTMLElement,
+    context: DependentViewContext,
+  ) {
+    context.registerDisposer(
+      this.spatialSkeletonNodeDataVersion.changed.add(context.redraw),
+    );
+    context.registerDisposer(
+      this.selectedSpatialSkeletonNodeInfo.changed.add(context.redraw),
+    );
+    const nodeId = getNodeIdFromLayerSelectionState(state);
+    if (nodeId === undefined) {
+      return false;
+    }
+
+    const selectedSegmentId = getSegmentIdFromLayerSelectionValue(state);
+    const skeletonLayer = this.getSpatiallyIndexedSkeletonLayer();
+    const cachedNodeInfo = this.spatialSkeletonState.getCachedNode(nodeId);
+    const completeNodeInfo = skeletonLayer?.getNode(nodeId) ?? cachedNodeInfo;
+    const selectedNodeInfo = this.selectedSpatialSkeletonNodeInfo.value;
+    const previewNodeInfo =
+      selectedNodeInfo !== undefined &&
+      selectedNodeInfo.nodeId === nodeId &&
+      selectedNodeInfo.segmentId === selectedSegmentId
+        ? selectedNodeInfo
+        : undefined;
+    const nodeInfo = completeNodeInfo ?? previewNodeInfo;
+    const container = document.createElement("div");
+    container.classList.add("neuroglancer-spatial-skeleton-selection");
+    parent.appendChild(container);
+
+    const appendValue = (label: string, value: string | HTMLElement) => {
+      const row = document.createElement("div");
+      row.classList.add("neuroglancer-annotation-property");
+      const nameElement = document.createElement("div");
+      nameElement.classList.add("neuroglancer-annotation-property-label");
+      nameElement.textContent = label;
+      const valueElement = document.createElement("div");
+      valueElement.classList.add("neuroglancer-annotation-property-value");
+      if (typeof value === "string") {
+        valueElement.textContent = value;
+      } else {
+        valueElement.appendChild(value);
+      }
+      row.appendChild(nameElement);
+      row.appendChild(valueElement);
+      container.appendChild(row);
+    };
+
+    const appendSegmentAndNodeIds = (segmentId: number, nodeId: number) => {
+      const segmentChipColors = getSpatialSkeletonSegmentChipColors(
+        this.displayState,
+        segmentId,
+      );
+      const segmentIdChip = document.createElement("span");
+      segmentIdChip.className =
+        "neuroglancer-spatial-skeleton-node-segment-chip";
+      segmentIdChip.textContent = `${segmentId}`;
+      segmentIdChip.style.backgroundColor = segmentChipColors.background;
+      segmentIdChip.style.color = segmentChipColors.foreground;
+      segmentIdChip.title =
+        `Segment ${segmentId}\n` +
+        "Ctrl+right-click to pin selection\n" +
+        "Ctrl+shift+right-click to unpin";
+      bindSpatialSkeletonSegmentSelection(
+        segmentIdChip,
+        this.selectSegment,
+        segmentId,
+      );
+      appendValue("Segment ID", segmentIdChip);
+      appendValue("Node ID", `${nodeId}`);
+    };
+
+    if (completeNodeInfo === undefined) {
+      const segmentId = nodeInfo?.segmentId ?? selectedSegmentId;
+      if (segmentId !== undefined) {
+        appendSegmentAndNodeIds(segmentId, nodeId);
+        return true;
+      }
+      const valueElement = document.createElement("div");
+      valueElement.classList.add(
+        "neuroglancer-selection-details-segment-description",
+      );
+      valueElement.textContent =
+        "Selected node is not available in the current loaded or cached skeleton data.";
+      container.appendChild(valueElement);
+      return true;
+    }
+
+    const fullNodeInfo = completeNodeInfo;
+    const segmentId = fullNodeInfo.segmentId;
+    const nodePosition = fullNodeInfo.position;
+    const segmentNodes =
+      this.spatialSkeletonState.getCachedSegmentNodes(segmentId);
+    const directChildNodeIds =
+      segmentNodes
+        ?.filter((candidate) => candidate.parentNodeId === fullNodeInfo.nodeId)
+        .map((candidate) => candidate.nodeId) ?? [];
+    const nodeHasTrueEnd = fullNodeInfo.isTrueEnd ?? false;
+    const nodeType = getSpatialSkeletonDisplayNodeType(
+      fullNodeInfo,
+      segmentNodes === undefined ? undefined : directChildNodeIds.length,
+    );
+    const nodeTypeLabel =
+      nodeType === undefined
+        ? "Unknown"
+        : getSpatialSkeletonNodeTypeLabel(nodeType, nodeHasTrueEnd);
+    const iconFilterType =
+      nodeType === undefined
+        ? undefined
+        : getSpatialSkeletonNodeIconFilterType({
+            nodeIsTrueEnd: nodeHasTrueEnd,
+            nodeType,
+          });
+    const summaryRow = document.createElement("div");
+    summaryRow.classList.add("neuroglancer-spatial-skeleton-selection-summary");
+    container.appendChild(summaryRow);
+
+    const editSource = getEditableSpatiallyIndexedSkeletonSource(skeletonLayer);
+    const rerootDisabledReason =
+      editSource?.rerootCommand === undefined
+        ? "Unable to resolve a reroot-capable skeleton source for the active layer."
+        : segmentNodes === undefined
+          ? "Load the active skeleton in the Skeleton tab before rerooting from Selection."
+          : fullNodeInfo.parentNodeId === undefined
+            ? "Selected node is already root."
+            : this.getSpatialSkeletonActionsDisabledReason(
+                SpatialSkeletonActions.reroot,
+                {
+                  requireVisibleChunks: false,
+                },
+              );
+    const rerootButton = document.createElement("button");
+    rerootButton.type = "button";
+    rerootButton.className = "neuroglancer-spatial-skeleton-selection-action";
+    rerootButton.disabled = rerootDisabledReason !== undefined;
+    rerootButton.title = rerootDisabledReason ?? "Set as root";
+    rerootButton.appendChild(
+      makeIcon({
+        svg: svg_origin,
+        title: rerootButton.title,
+        clickable: false,
+      }),
+    );
+    let rerootPending = false;
+    rerootButton.addEventListener("click", () => {
+      if (
+        rerootButton.disabled ||
+        rerootPending ||
+        completeNodeInfo === undefined ||
+        completeNodeInfo.parentNodeId === undefined
+      ) {
+        return;
+      }
+      rerootPending = true;
+      rerootButton.disabled = true;
+      void (async () => {
+        try {
+          await this.rerootSpatialSkeletonNode(completeNodeInfo);
+        } catch (error) {
+          showSpatialSkeletonActionError("set node as root", error);
+        } finally {
+          rerootPending = false;
+          context.redraw();
+        }
+      })();
+    });
+    const deleteDisabledReason =
+      editSource === undefined
+        ? "Unable to resolve editable skeleton source for the active layer."
+        : segmentNodes === undefined
+          ? "Load the active skeleton in the Skeleton tab before deleting from Selection."
+          : fullNodeInfo.parentNodeId === undefined &&
+              directChildNodeIds.length > 0
+            ? "Reroot the skeleton manually before deleting the current root node."
+            : this.getSpatialSkeletonActionsDisabledReason(
+                SpatialSkeletonActions.deleteNodes,
+              );
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "neuroglancer-spatial-skeleton-selection-action";
+    deleteButton.disabled = deleteDisabledReason !== undefined;
+    deleteButton.title = deleteDisabledReason ?? "Delete node";
+    deleteButton.appendChild(
+      makeDeleteButton({ title: deleteButton.title, clickable: false }),
+    );
+    let deletePending = false;
+    deleteButton.addEventListener("click", () => {
+      if (
+        deleteButton.disabled ||
+        editSource === undefined ||
+        completeNodeInfo === undefined ||
+        deletePending
+      ) {
+        return;
+      }
+      deletePending = true;
+      void (async () => {
+        try {
+          await executeSpatialSkeletonDeleteNode(this, completeNodeInfo);
+        } catch (error) {
+          showSpatialSkeletonActionError("delete node", error);
+        } finally {
+          deletePending = false;
+        }
+      })();
+    });
+    summaryRow.appendChild(rerootButton);
+    summaryRow.appendChild(deleteButton);
+
+    const icon = document.createElement("span");
+    icon.className = "neuroglancer-spatial-skeleton-selection-summary-icon";
+    const nodeTypeIconTitle =
+      iconFilterType !== undefined
+        ? getSpatialSkeletonNodeFilterLabel(iconFilterType)
+        : nodeTypeLabel;
+    icon.appendChild(
+      makeIcon({
+        svg:
+          iconFilterType === SpatialSkeletonNodeFilterType.TRUE_END
+            ? svg_flag
+            : iconFilterType === SpatialSkeletonNodeFilterType.VIRTUAL_END
+              ? svg_circle
+              : nodeType === undefined
+                ? svg_circle
+                : SPATIAL_SKELETON_NODE_TYPE_ICONS[nodeType],
+        title: nodeTypeIconTitle,
+        clickable: false,
+      }),
+    );
+    summaryRow.appendChild(icon);
+
+    const skeletonDisplayTransform =
+      skeletonLayer?.displayState.transform.value;
+    let displayPosition: ArrayLike<number> = nodePosition;
+    let displayNames: readonly string[] | undefined;
+    if (
+      skeletonDisplayTransform !== undefined &&
+      skeletonDisplayTransform.error === undefined
+    ) {
+      const rank = skeletonDisplayTransform.rank;
+      const modelPos = new Float32Array(rank);
+      for (let i = 0; i < Math.min(nodePosition.length, rank); i++) {
+        modelPos[i] = Number(nodePosition[i]);
+      }
+      const layerPos = new Float32Array(rank);
+      matrix.transformPoint(
+        layerPos,
+        skeletonDisplayTransform.modelToRenderLayerTransform,
+        rank + 1,
+        modelPos,
+        rank,
+      );
+      displayPosition = layerPos;
+      displayNames = skeletonDisplayTransform.layerDimensionNames;
+    }
+    const position = formatSpatialSkeletonPosition(
+      displayPosition,
+      displayNames,
+    );
+    const summaryCoordinates = document.createElement("span");
+    summaryCoordinates.className =
+      "neuroglancer-spatial-skeleton-selection-summary-coordinates";
+    summaryCoordinates.textContent = position.displayText;
+    summaryCoordinates.title = position.fullText;
+    summaryRow.appendChild(summaryCoordinates);
+
+    appendSegmentAndNodeIds(segmentId, fullNodeInfo.nodeId);
+    const isLeaf =
+      segmentNodes !== undefined && directChildNodeIds.length === 0;
+    const leafTypeEditingDisabledReason = () =>
+      editSource === undefined
+        ? "Unable to resolve editable skeleton source for the active layer."
+        : cachedNodeInfo === undefined || segmentNodes === undefined
+          ? "Load the active skeleton in the Skeleton tab before changing leaf type."
+          : this.getSpatialSkeletonActionsDisabledReason(
+              SpatialSkeletonActions.editNodeTrueEnd,
+            );
+    if (isLeaf || nodeHasTrueEnd) {
+      let committedTrueEnd = nodeHasTrueEnd;
+      let leafTypeSavePending = false;
+      const leafTypeEditor = document.createElement("div");
+      leafTypeEditor.className = "neuroglancer-spatial-skeleton-leaf-type";
+      const leafTypeRadioName = `neuroglancer-spatial-skeleton-leaf-type-${segmentId}-${fullNodeInfo.nodeId}`;
+      const leafTypeOptionElements: HTMLLabelElement[] = [];
+      const makeLeafTypeOption = (options: {
+        label: string;
+        svg: string;
+        trueEnd: boolean;
+      }) => {
+        const option = document.createElement("label");
+        option.className = "neuroglancer-spatial-skeleton-leaf-type-option";
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = leafTypeRadioName;
+        input.value = options.trueEnd ? "trueEnd" : "virtualEnd";
+        input.className =
+          "neuroglancer-spatial-skeleton-leaf-type-option-input";
+        const icon = document.createElement("span");
+        icon.className = "neuroglancer-spatial-skeleton-leaf-type-option-icon";
+        icon.appendChild(
+          makeIcon({
+            svg: options.svg,
+            title: options.label,
+            clickable: false,
+          }),
+        );
+        const text = document.createElement("span");
+        text.className = "neuroglancer-spatial-skeleton-leaf-type-option-text";
+        text.textContent = options.label;
+        option.appendChild(input);
+        option.appendChild(icon);
+        option.appendChild(text);
+        leafTypeOptionElements.push(option);
+        leafTypeEditor.appendChild(option);
+        return input;
+      };
+      const virtualEndInput = makeLeafTypeOption({
+        label: "Virtual end",
+        svg: svg_circle,
+        trueEnd: false,
+      });
+      const trueEndInput = makeLeafTypeOption({
+        label: "True end",
+        svg: svg_flag,
+        trueEnd: true,
+      });
+      const updateLeafTypeEditorState = () => {
+        const disabledReason = leafTypeEditingDisabledReason();
+        const editable = disabledReason === undefined && !leafTypeSavePending;
+        virtualEndInput.checked = !committedTrueEnd;
+        trueEndInput.checked = committedTrueEnd;
+        for (const input of [virtualEndInput, trueEndInput]) {
+          input.disabled = !editable;
+          if (disabledReason !== undefined) {
+            input.title = disabledReason;
+          } else {
+            input.removeAttribute("title");
+          }
+        }
+        for (const option of leafTypeOptionElements) {
+          option.classList.toggle(
+            "neuroglancer-spatial-skeleton-leaf-type-option-disabled",
+            !editable,
+          );
+          if (disabledReason !== undefined) {
+            option.title = disabledReason;
+          } else {
+            option.removeAttribute("title");
+          }
+        }
+      };
+      const commitLeafType = (nextTrueEnd: boolean) => {
+        if (leafTypeSavePending) return;
+        const disabledReason = leafTypeEditingDisabledReason();
+        if (disabledReason !== undefined) {
+          StatusMessage.showTemporaryMessage(disabledReason);
+          updateLeafTypeEditorState();
+          return;
+        }
+        if (committedTrueEnd === nextTrueEnd) {
+          updateLeafTypeEditorState();
+          return;
+        }
+        const previousTrueEnd = committedTrueEnd;
+        committedTrueEnd = nextTrueEnd;
+        leafTypeSavePending = true;
+        updateLeafTypeEditorState();
+        void (async () => {
+          try {
+            const currentNode = this.spatialSkeletonState.getCachedNode(
+              fullNodeInfo.nodeId,
+            );
+            if (currentNode === undefined) {
+              throw new Error(
+                `Node ${fullNodeInfo.nodeId} is missing from the inspected skeleton cache.`,
+              );
+            }
+            await executeSpatialSkeletonNodeTrueEndUpdate(this, {
+              node: currentNode,
+              nextIsTrueEnd: nextTrueEnd,
+            });
+            committedTrueEnd = nextTrueEnd;
+          } catch (error) {
+            committedTrueEnd = previousTrueEnd;
+            const message =
+              error instanceof Error ? error.message : String(error);
+            StatusMessage.showTemporaryMessage(
+              `Failed to update leaf type: ${message}`,
+            );
+          } finally {
+            leafTypeSavePending = false;
+            updateLeafTypeEditorState();
+          }
+        })();
+      };
+      virtualEndInput.addEventListener("change", () => {
+        if (!virtualEndInput.checked) return;
+        commitLeafType(false);
+      });
+      trueEndInput.addEventListener("change", () => {
+        if (!trueEndInput.checked) return;
+        commitLeafType(true);
+      });
+      updateLeafTypeEditorState();
+      appendValue("Node type", leafTypeEditor);
+    } else {
+      appendValue("Node type", nodeTypeLabel);
+    }
+    const confidenceConfiguration =
+      editSource?.spatialSkeletonConfidenceConfiguration;
+    const setPropertyInputValidity = (
+      input: HTMLInputElement | HTMLSelectElement,
+      valid: boolean,
+      invalidTitle: string,
+      disabledReason: string | undefined,
+    ) => {
+      input.classList.toggle(
+        "neuroglancer-spatial-skeleton-properties-input-invalid",
+        !valid,
+      );
+      if (disabledReason !== undefined) {
+        input.title = disabledReason;
+      } else if (!valid) {
+        input.title = invalidTitle;
+      } else {
+        input.removeAttribute("title");
+      }
+    };
+    const handlePropertyInputKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      (event.currentTarget as HTMLElement | null)?.blur();
+    };
+    const getCachedNodeForPropertyEdit = () => {
+      const currentNode = this.spatialSkeletonState.getCachedNode(
+        fullNodeInfo.nodeId,
+      );
+      if (currentNode === undefined) {
+        throw new Error(
+          `Node ${fullNodeInfo.nodeId} is missing from the inspected skeleton cache.`,
+        );
+      }
+      return currentNode;
+    };
+    const radiusEditingDisabledReason = () =>
+      editSource === undefined
+        ? "Unable to resolve editable skeleton source for the active layer."
+        : cachedNodeInfo === undefined
+          ? "Load the active skeleton in the Skeleton tab before editing radius."
+          : this.getSpatialSkeletonActionsDisabledReason(
+              SpatialSkeletonActions.editNodeRadius,
+            );
+    const confidenceEditingDisabledReason = () =>
+      editSource === undefined
+        ? "Unable to resolve editable skeleton source for the active layer."
+        : cachedNodeInfo === undefined
+          ? "Load the active skeleton in the Skeleton tab before editing confidence."
+          : confidenceConfiguration === undefined
+            ? "The active skeleton source does not provide confidence value configuration."
+            : this.getSpatialSkeletonActionsDisabledReason(
+                SpatialSkeletonActions.editNodeConfidence,
+              );
+
+    if (radiusEditingDisabledReason() !== undefined) {
+      appendValue(
+        "Radius",
+        formatSpatialSkeletonEditableNumber(fullNodeInfo.radius, "Unavailable"),
+      );
+    } else {
+      let committedRadius = fullNodeInfo.radius ?? 0;
+      const radiusInput = document.createElement("input");
+      radiusInput.className = "neuroglancer-spatial-skeleton-properties-input";
+      radiusInput.type = "number";
+      radiusInput.step = "any";
+      radiusInput.value = formatSpatialSkeletonEditableNumber(
+        fullNodeInfo.radius,
+      );
+      appendValue("Radius", radiusInput);
+      let radiusSavePending = false;
+      const getParsedRadius = () => {
+        const radius = Number(radiusInput.value);
+        return {
+          radius,
+          radiusValid: Number.isFinite(radius),
+        };
+      };
+      const updateRadiusEditorState = () => {
+        const disabledReason = radiusEditingDisabledReason();
+        const { radiusValid } = getParsedRadius();
+        radiusInput.disabled =
+          disabledReason !== undefined || radiusSavePending;
+        setPropertyInputValidity(
+          radiusInput,
+          radiusValid,
+          "Radius must be a finite number.",
+          disabledReason,
+        );
+      };
+      const resetRadiusInput = () => {
+        radiusInput.value =
+          formatSpatialSkeletonEditableNumber(committedRadius);
+        updateRadiusEditorState();
+      };
+      const commitRadius = () => {
+        if (radiusSavePending) return;
+        const disabledReason = radiusEditingDisabledReason();
+        if (disabledReason !== undefined) {
+          StatusMessage.showTemporaryMessage(disabledReason);
+          resetRadiusInput();
+          return;
+        }
+        const { radius, radiusValid } = getParsedRadius();
+        if (!radiusValid) {
+          StatusMessage.showTemporaryMessage("Radius must be a finite number.");
+          resetRadiusInput();
+          return;
+        }
+        if (radius === committedRadius) {
+          resetRadiusInput();
+          return;
+        }
+        radiusSavePending = true;
+        updateRadiusEditorState();
+        void (async () => {
+          try {
+            await executeSpatialSkeletonNodeRadiusUpdate(this, {
+              node: getCachedNodeForPropertyEdit(),
+              nextRadius: radius,
+            });
+            committedRadius = radius;
+            resetRadiusInput();
+          } catch (error) {
+            showSpatialSkeletonActionError("update node radius", error);
+            resetRadiusInput();
+          } finally {
+            radiusSavePending = false;
+            updateRadiusEditorState();
+          }
+        })();
+      };
+      const debouncedCommitRadius = context.registerCancellable(
+        debounce(commitRadius, 500),
+      );
+      radiusInput.addEventListener("input", updateRadiusEditorState);
+      radiusInput.addEventListener("change", () => debouncedCommitRadius());
+      radiusInput.addEventListener("blur", () => debouncedCommitRadius.flush());
+      radiusInput.addEventListener("keydown", handlePropertyInputKeyDown);
+      updateRadiusEditorState();
+    }
+
+    const confidenceConfigurationValues = confidenceConfiguration?.values;
+    if (
+      confidenceEditingDisabledReason() !== undefined ||
+      confidenceConfigurationValues === undefined
+    ) {
+      appendValue(
+        "Confidence level",
+        formatSpatialSkeletonEditableNumber(
+          fullNodeInfo.confidence,
+          "Unavailable",
+        ),
+      );
+    } else {
+      let committedConfidence =
+        fullNodeInfo.confidence !== undefined &&
+        Number.isFinite(fullNodeInfo.confidence)
+          ? Number(fullNodeInfo.confidence)
+          : 0;
+      const supportedConfidenceValues = Array.from(
+        new Set([...confidenceConfigurationValues, committedConfidence]),
+      ).filter((value): value is number => Number.isFinite(value));
+      const confidenceSelectValues = Array.from(
+        new Set([...supportedConfidenceValues, committedConfidence]),
+      );
+      const confidenceControl = document.createElement("select");
+      confidenceControl.className =
+        "neuroglancer-spatial-skeleton-properties-input";
+      for (const value of confidenceSelectValues) {
+        const option = document.createElement("option");
+        option.value = value.toString();
+        option.textContent = formatSpatialSkeletonEditableNumber(value);
+        confidenceControl.appendChild(option);
+      }
+      confidenceControl.value = committedConfidence.toString();
+      appendValue("Confidence level", confidenceControl);
+      let confidenceSavePending = false;
+      const getConfidenceValidationError = (confidence: number) => {
+        if (!Number.isFinite(confidence)) {
+          return "Confidence must be a finite number.";
+        }
+        return confidenceSelectValues.includes(confidence)
+          ? undefined
+          : "Confidence must use one of the supported values.";
+      };
+      const getParsedConfidence = () => {
+        const confidence = Number(confidenceControl.value);
+        const confidenceInvalidTitle = getConfidenceValidationError(confidence);
+        return {
+          confidence,
+          confidenceValid: confidenceInvalidTitle === undefined,
+          confidenceInvalidTitle,
+        };
+      };
+      const updateConfidenceEditorState = () => {
+        const confidenceDisabledReason = confidenceEditingDisabledReason();
+        const { confidenceValid, confidenceInvalidTitle } =
+          getParsedConfidence();
+        confidenceControl.disabled =
+          confidenceDisabledReason !== undefined || confidenceSavePending;
+        setPropertyInputValidity(
+          confidenceControl,
+          confidenceValid,
+          confidenceInvalidTitle ?? "Confidence is invalid.",
+          confidenceDisabledReason,
+        );
+      };
+      const resetConfidenceInput = () => {
+        confidenceControl.value = committedConfidence.toString();
+        updateConfidenceEditorState();
+      };
+      const commitConfidence = () => {
+        if (confidenceSavePending) return;
+        const disabledReason = confidenceEditingDisabledReason();
+        if (disabledReason !== undefined) {
+          StatusMessage.showTemporaryMessage(disabledReason);
+          resetConfidenceInput();
+          return;
+        }
+        const { confidence, confidenceValid, confidenceInvalidTitle } =
+          getParsedConfidence();
+        if (!confidenceValid) {
+          StatusMessage.showTemporaryMessage(
+            confidenceInvalidTitle ?? "Confidence is invalid.",
+          );
+          resetConfidenceInput();
+          return;
+        }
+        const confidenceChanged = confidence !== committedConfidence;
+        if (!confidenceChanged) {
+          resetConfidenceInput();
+          return;
+        }
+        confidenceSavePending = true;
+        updateConfidenceEditorState();
+        void (async () => {
+          try {
+            await executeSpatialSkeletonNodeConfidenceUpdate(this, {
+              node: getCachedNodeForPropertyEdit(),
+              nextConfidence: confidence,
+            });
+            committedConfidence = confidence;
+            resetConfidenceInput();
+          } catch (error) {
+            showSpatialSkeletonActionError("update node confidence", error);
+            resetConfidenceInput();
+          } finally {
+            confidenceSavePending = false;
+            updateConfidenceEditorState();
+          }
+        })();
+      };
+      confidenceControl.addEventListener("change", commitConfidence);
+      updateConfidenceEditorState();
+    }
+    const descriptionText =
+      cachedNodeInfo?.description ?? completeNodeInfo?.description ?? "";
+    const descriptionEditingDisabledReason =
+      editSource === undefined
+        ? "Unable to resolve editable skeleton source for the active layer."
+        : cachedNodeInfo === undefined
+          ? "Load the active skeleton in the Skeleton tab before editing description."
+          : this.getSpatialSkeletonActionsDisabledReason(
+              SpatialSkeletonActions.editNodeDescription,
+            );
+    if (descriptionEditingDisabledReason === undefined) {
+      const descriptionElement = document.createElement("textarea");
+      descriptionElement.classList.add(
+        "neuroglancer-spatial-skeleton-selection-description",
+      );
+      descriptionElement.rows = 3;
+      descriptionElement.placeholder = "Description";
+      descriptionElement.value = descriptionText;
+      descriptionElement.addEventListener("change", () => {
+        if (editSource === undefined || cachedNodeInfo === undefined) {
+          return;
+        }
+        const nextDescription = descriptionElement.value;
+        if (descriptionText === nextDescription) {
+          descriptionElement.value = nextDescription;
+          return;
+        }
+        descriptionElement.disabled = true;
+        void (async () => {
+          try {
+            const currentNode = this.spatialSkeletonState.getCachedNode(
+              fullNodeInfo.nodeId,
+            );
+            if (currentNode === undefined) {
+              throw new Error(
+                `Node ${fullNodeInfo.nodeId} is missing from the inspected skeleton cache.`,
+              );
+            }
+            await executeSpatialSkeletonNodeDescriptionUpdate(this, {
+              node: currentNode,
+              nextDescription,
+            });
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            descriptionElement.value = descriptionText;
+            StatusMessage.showTemporaryMessage(
+              `Failed to update description: ${message}`,
+            );
+          } finally {
+            descriptionElement.disabled = false;
+          }
+        })();
+      });
+      container.appendChild(descriptionElement);
+    } else if (descriptionText.length > 0) {
+      const descriptionElement = document.createElement("div");
+      descriptionElement.classList.add(
+        "neuroglancer-spatial-skeleton-selection-description",
+      );
+      descriptionElement.textContent = descriptionText;
+      descriptionElement.title = descriptionEditingDisabledReason;
+      container.appendChild(descriptionElement);
+    } else if (completeNodeInfo === undefined) {
+      appendValue("Description", "Unavailable");
+    }
+    return true;
+  }
+
   displaySelectionState(
     state: this["selectionState"],
     parent: HTMLElement,
     context: DependentViewContext,
   ): boolean {
     let displayed = this.displaySegmentationSelection(state, parent, context);
-    if (displaySpatialSkeletonSelection(this, state, parent, context))
+    if (this.displaySpatialSkeletonSelection(state, parent, context))
       displayed = true;
     if (super.displaySelectionState(state, parent, context)) displayed = true;
     return displayed;
@@ -3662,7 +3334,7 @@ registerLayerControls(SegmentationUserLayer);
 registerLayerType(SegmentationUserLayer);
 registerVolumeLayerType(VolumeType.SEGMENTATION, SegmentationUserLayer);
 registerLayerTypeDetector((subsource) => {
-  if (subsource.mesh !== undefined || subsource.zarrVectors !== undefined) {
+  if (subsource.mesh !== undefined) {
     return { layerConstructor: SegmentationUserLayer, priority: 1 };
   }
   return undefined;

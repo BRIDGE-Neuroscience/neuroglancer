@@ -56,18 +56,17 @@ import type {
   SpatiallyIndexedSkeletonNode,
   SpatiallyIndexedSkeletonNodeBase,
 } from "#src/skeleton/api.js";
-import { SkeletonSource } from "#src/skeleton/frontend.js";
+import {
+  SpatiallyIndexedSkeletonSource,
+  SkeletonSource,
+  MultiscaleSpatiallyIndexedSkeletonSource,
+  SPATIAL_SKELETON_SOURCE_OPTIONS,
+} from "#src/skeleton/frontend.js";
 import {
   buildSpatialSkeletonGridLevels,
-  sortSpatialSkeletonGridSizes,
   type SpatialSkeletonGridLevel,
   type SpatialSkeletonGridSize,
 } from "#src/skeleton/spatial_chunk_sizing.js";
-import {
-  SpatiallyIndexedSkeletonSource,
-  MultiscaleSpatiallyIndexedSkeletonSource,
-  SPATIAL_SKELETON_SOURCE_OPTIONS,
-} from "#src/skeleton/spatial_frontend.js";
 import type { SliceViewSourceOptions } from "#src/sliceview/base.js";
 import { makeSliceViewChunkSpecification } from "#src/sliceview/base.js";
 import { ChunkLayout } from "#src/sliceview/chunk_layout.js";
@@ -220,12 +219,7 @@ export class CatmaidMultiscaleSpatiallyIndexedSkeletonSource extends MultiscaleS
     private sourceReadonly = true,
   ) {
     super(chunkManager);
-    // CATMAID's levels differ by chunk size and arrive in no guaranteed order,
-    // so rank them by spacing. `buildSpatialSkeletonGridLevels` preserves the
-    // order it is given rather than deriving one — see its docstring.
-    this.gridLevels = buildSpatialSkeletonGridLevels(
-      sortSpatialSkeletonGridSizes(gridCellSizes),
-    );
+    this.gridLevels = buildSpatialSkeletonGridLevels(gridCellSizes);
   }
 
   getSpatialSkeletonGridSizes(): SpatialSkeletonGridSize[] {

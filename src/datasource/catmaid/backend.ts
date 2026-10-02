@@ -27,10 +27,14 @@ import {
   makeCatmaidClient,
 } from "#src/datasource/catmaid/base.js";
 import { packCatmaidSkeletonNodes } from "#src/datasource/catmaid/skeleton_packing.js";
-import type { SkeletonChunk } from "#src/skeleton/backend.js";
-import { SkeletonSource } from "#src/skeleton/backend.js";
-import type { SpatiallyIndexedSkeletonChunk } from "#src/skeleton/spatial_backend.js";
-import { SpatiallyIndexedSkeletonSourceBackend } from "#src/skeleton/spatial_backend.js";
+import type {
+  SpatiallyIndexedSkeletonChunk,
+  SkeletonChunk,
+} from "#src/skeleton/backend.js";
+import {
+  SpatiallyIndexedSkeletonSourceBackend,
+  SkeletonSource,
+} from "#src/skeleton/backend.js";
 import { registerSharedObject } from "#src/worker_rpc.js";
 
 @registerSharedObject()

@@ -27,8 +27,6 @@
     "build-package": "node ./build_tools/build-package.ts",
     "build-python": "node ./build_tools/cli.ts --python build",
     "build-python:watch": "node ./build_tools/cli.ts --python build --watch",
-    "build-pyodide": "node ./build_tools/build_pyodide.ts",
-    "build-pyodide:watch": "node ./build_tools/build_pyodide.ts --watch --mode=development",
     "test": "vitest --run",
     "test:watch": "vitest watch",
     "example-project-test": "playwright test",

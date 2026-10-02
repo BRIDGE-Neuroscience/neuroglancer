@@ -43,6 +43,7 @@ import {
   parseAnnotationPropertySpecs,
   propertyTypeDataType,
 } from "#src/annotation/index.js";
+import { FramedDialog } from "#src/overlay.js";
 import { StatusMessage } from "#src/status.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
@@ -81,7 +82,6 @@ import { numberToStringFixed } from "#src/util/number_to_string.js";
 import { NullarySignal } from "#src/util/signal.js";
 import { makeAddButton } from "#src/widget/add_button.js";
 import { makeCopyButton } from "#src/widget/copy_button.js";
-import { FramedDialog } from "#src/widget/framed_dialog.js";
 import { makeIcon } from "#src/widget/icon.js";
 import { Tab } from "#src/widget/tab_view.js";
 

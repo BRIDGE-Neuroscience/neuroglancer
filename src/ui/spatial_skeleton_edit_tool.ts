@@ -40,12 +40,14 @@ import type {
   SpatialSkeletonSourceState,
   SpatialSkeletonVector,
 } from "#src/skeleton/api.js";
-import { setSpatialSkeletonModesToLinesAndPoints } from "#src/skeleton/frontend.js";
-import { type SpatiallyIndexedSkeletonLayer } from "#src/skeleton/spatial_frontend.js";
+import {
+  type SpatiallyIndexedSkeletonLayer,
+  setSpatialSkeletonModesToLinesAndPoints,
+} from "#src/skeleton/frontend.js";
 import {
   PerspectiveViewSpatiallyIndexedSkeletonLayer,
   SliceViewPanelSpatiallyIndexedSkeletonLayer,
-} from "#src/skeleton/spatial_frontend.js";
+} from "#src/skeleton/frontend.js";
 import { StatusMessage } from "#src/status.js";
 import type { SpatialSkeletonToolPointInfo } from "#src/ui/spatial_skeleton_tool_messages.js";
 import {

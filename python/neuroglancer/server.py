@@ -15,7 +15,6 @@
 import asyncio
 import concurrent.futures
 import json
-import logging
 import multiprocessing
 import os
 import re
@@ -26,14 +25,10 @@ import threading
 import weakref
 
 import numpy as np
-
-from .async_util import _PYODIDE
-
-if not _PYODIDE:
-    import tornado.httpserver
-    import tornado.netutil
-    import tornado.platform.asyncio
-    import tornado.web
+import tornado.httpserver
+import tornado.netutil
+import tornado.platform.asyncio
+import tornado.web
 
 from . import async_util, local_volume, skeleton, static
 from .json_utils import encode_json, json_encoder_default
@@ -67,8 +62,6 @@ SET_STATE_PATH_REGEX = r"^/state/(?P<viewer_token>[^/]+)$"
 
 CREDENTIALS_PATH_REGEX = r"^/credentials/(?P<viewer_token>[^/]+)$"
 
-TRACT_EXPORT_PATH_REGEX = r"^/neuroglancer/export/tract/(?P<viewer_token>[^/]+)$"
-
 global_static_content_source = None
 
 global_server_args = dict(bind_address="127.0.0.1", bind_port=0)
@@ -78,668 +71,583 @@ debug: bool = False
 _IS_GOOGLE_COLAB = "google.colab" in sys.modules
 
 
-if not _PYODIDE:
+def _get_server_url(bind_address: str, port: int) -> str:
+    if _IS_GOOGLE_COLAB:
+        return _get_colab_server_url(port)
+    return _get_regular_server_url(bind_address, port)
 
-    def _get_server_url(bind_address: str, port: int) -> str:
-        if _IS_GOOGLE_COLAB:
-            return _get_colab_server_url(port)
-        return _get_regular_server_url(bind_address, port)
 
-    def _get_regular_server_url(bind_address: str, port: int) -> str:
-        if bind_address == "0.0.0.0" or bind_address == "::":
-            hostname = socket.getfqdn()
-        else:
-            hostname = bind_address
-        return f"http://{hostname}:{port}"
+def _get_regular_server_url(bind_address: str, port: int) -> str:
+    if bind_address == "0.0.0.0" or bind_address == "::":
+        hostname = socket.getfqdn()
+    else:
+        hostname = bind_address
+    return f"http://{hostname}:{port}"
 
-    def _get_colab_server_url(port: int) -> str:
-        import google.colab.output
 
-        return google.colab.output.eval_js(f"google.colab.kernel.proxyPort({port})")
+def _get_colab_server_url(port: int) -> str:
+    import google.colab.output
 
-    class Server(async_util.BackgroundTornadoServer):
-        def __init__(self, bind_address="127.0.0.1", bind_port=0, token=None):
-            super().__init__(daemon=True)
-            self.viewers = weakref.WeakValueDictionary()
-            self._bind_address = bind_address
-            self._bind_port = bind_port
-            if token is None:
-                token = make_random_token()
-            self.token = token
-            self.executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=multiprocessing.cpu_count()
-            )
+    return google.colab.output.eval_js(f"google.colab.kernel.proxyPort({port})")
 
-        def _attempt_to_start_server(self):
-            def log_function(handler):
-                if debug:
-                    print(
-                        "%d %s %.2fs"
-                        % (
-                            handler.get_status(),
-                            handler.request.uri,
-                            handler.request.request_time(),
-                        )
-                    )
 
-            app = self.app = tornado.web.Application(
-                [
-                    (STATIC_PATH_REGEX, StaticPathHandler, dict(server=self)),
-                    (INFO_PATH_REGEX, VolumeInfoHandler, dict(server=self)),
-                    (SKELETON_INFO_PATH_REGEX, SkeletonInfoHandler, dict(server=self)),
-                    (DATA_PATH_REGEX, SubvolumeHandler, dict(server=self)),
-                    (SKELETON_PATH_REGEX, SkeletonHandler, dict(server=self)),
-                    (MESH_PATH_REGEX, MeshHandler, dict(server=self)),
-                    (ACTION_PATH_REGEX, ActionHandler, dict(server=self)),
-                    (
-                        VOLUME_INFO_RESPONSE_PATH_REGEX,
-                        VolumeInfoResponseHandler,
-                        dict(server=self),
-                    ),
-                    (
-                        VOLUME_CHUNK_RESPONSE_PATH_REGEX,
-                        VolumeChunkResponseHandler,
-                        dict(server=self),
-                    ),
-                    (EVENTS_PATH_REGEX, EventStreamHandler, dict(server=self)),
-                    (SET_STATE_PATH_REGEX, SetStateHandler, dict(server=self)),
-                    (CREDENTIALS_PATH_REGEX, CredentialsHandler, dict(server=self)),
-                    (TRACT_EXPORT_PATH_REGEX, TractExportHandler, dict(server=self)),
-                ],
-                log_function=log_function,
-            )
-            self.http_server = tornado.httpserver.HTTPServer(
-                app,
-                # Allow very large requests to accommodate large screenshots.
-                max_buffer_size=1024**3,
-            )
-            sockets = tornado.netutil.bind_sockets(
-                port=self._bind_port, address=self._bind_address
-            )
-            self.http_server.add_sockets(sockets)
-            actual_port = sockets[0].getsockname()[1]
-
-            global global_static_content_source
-            if global_static_content_source is None:
-                global_static_content_source = (
-                    static.get_default_static_content_source()
-                )
-            self.port = actual_port
-            self.server_url = _get_server_url(self._bind_address, actual_port)
-            self.regular_server_url = _get_regular_server_url(
-                self._bind_address, actual_port
-            )
-            self._credentials_manager = None
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            self.stop()
-
-        def get_volume(self, key):
-            dot_index = key.find(".")
-            if dot_index == -1:
-                return None
-            viewer_token = key[:dot_index]
-            volume_token = key[dot_index + 1 :]
-            viewer = self.viewers.get(viewer_token)
-            if viewer is None:
-                return None
-            return viewer.volume_manager.volumes.get(volume_token)
-
-    class BaseRequestHandler(tornado.web.RequestHandler):
-        def initialize(self, server):
-            self.server = server
-
-    class StaticPathHandler(BaseRequestHandler):
-        def get(self, viewer_token, path):
-            if (
-                viewer_token != self.server.token
-                and viewer_token not in self.server.viewers
-            ):
-                self.send_error(404)
-                return
-            try:
-                query = self.request.query
-                if query:
-                    query = f"?{query}"
-                data, content_type = global_static_content_source.get(path, query)
-            except ValueError as e:
-                self.send_error(404, message=e.args[0])
-                return
-            self.set_header("Content-type", content_type)
-            self.finish(data)
-
-    class TractExportHandler(BaseRequestHandler):
-        """Run an ROI-dissection export posted by the viewer's Export tab.
-
-        Deliberately blocking, on a thread: the writers pull whole objects out
-        of the store, so a real export is seconds-to-minutes of CPU and I/O and
-        would stall the event loop -- and with it every chunk request the viewer
-        is making -- if it ran inline.
-        """
-
-        async def post(self, viewer_token):
-            from .tract_export.job import JobSpecError, parse_job
-            from .tract_export.run import ExportRunError, run_job
-
-            # Token-scoped like every other route here. This one writes a file
-            # at a path the request chooses, so an unauthenticated version would
-            # let any page the user visits drop content anywhere the server can
-            # write -- the same check StaticPathHandler makes.
-            if (
-                viewer_token != self.server.token
-                and viewer_token not in self.server.viewers
-            ):
-                self.send_error(404)
-                return
-
-            try:
-                spec = json.loads(self.request.body)
-            except ValueError as e:
-                self.set_status(400)
-                self.finish(json.dumps({"error": f"Invalid JSON: {e}"}))
-                return
-
-            try:
-                job = parse_job(spec)
-            except JobSpecError as e:
-                # 400, not 500: the spec is the caller's to fix, and the message
-                # is written to be shown verbatim in the tab.
-                self.set_status(400)
-                self.finish(json.dumps({"error": str(e)}))
-                return
-
-            self.set_header("Content-Type", "application/json")
-            try:
-                summary = await asyncio.to_thread(run_job, job)
-            except ExportRunError as e:
-                self.set_status(422)
-                self.finish(json.dumps({"error": str(e)}))
-                return
-            except Exception as e:
-                # The ZVF path calls into zarr directly, which raises its own
-                # exception types; without this they escape as tornado's HTML
-                # 500 and the tab's `response.json()` fails on the error path.
-                logging.exception("tract export failed")
-                self.set_status(500)
-                self.finish(json.dumps({"error": f"Export failed: {e}"}))
-                return
-
-            self.finish(json.dumps(summary))
-
-    class ActionHandler(BaseRequestHandler):
-        def post(self, viewer_token):
-            viewer = self.server.viewers.get(viewer_token)
-            if viewer is None:
-                self.send_error(404)
-                return
-            action = json.loads(self.request.body)
-            self.server.loop.call_soon(
-                viewer.actions.invoke, action["action"], action["state"]
-            )
-            self.finish("")
-
-    class VolumeInfoResponseHandler(BaseRequestHandler):
-        def post(self, viewer_token, request_id):
-            viewer = self.server.viewers.get(viewer_token)
-            if viewer is None:
-                self.send_error(404)
-                return
-
-            info = json.loads(self.request.body)
-            self.server.loop.call_soon(
-                viewer._handle_volume_info_reply, request_id, info
-            )
-            self.finish("")
-
-    class VolumeChunkResponseHandler(BaseRequestHandler):
-        def post(self, viewer_token, request_id):
-            viewer = self.server.viewers.get(viewer_token)
-            if viewer is None:
-                self.send_error(404)
-                return
-
-            params = json.loads(self.get_argument("p"))
-            data = self.request.body
-            self.server.loop.call_soon(
-                viewer._handle_volume_chunk_reply, request_id, params, data
-            )
-            self.finish("")
-
-    class EventStreamStateWatcher:
-        def __init__(
-            self, key: str, client_id: str, state, last_generation: str, wake_up
-        ):
-            self.key = key
-            self.state = state
-            self.last_generation = last_generation
-            self._wake_up = wake_up
-            self._client_id = client_id
-            state.add_changed_callback(wake_up)
-
-        def unregister(self):
-            self.state.remove_changed_callback(self._wake_up)
-
-        def maybe_send_update(self, handler):
-            raw_state, generation = self.state.raw_state_and_generation
-            if generation == self.last_generation:
-                return False
-            if generation.startswith(self._client_id + "/"):
-                return False
-            self.last_generation = generation
-            msg = {"k": self.key, "s": raw_state, "g": generation}
-            handler.write(f"data: {encode_json(msg)}\n\n")
-            if debug:
-                print(f"data: {encode_json(msg)}\n\n")
-            return True
-
-    class EventStreamHandler(BaseRequestHandler):
-        async def get(self, viewer_token: str):
-            viewer = self.server.viewers.get(viewer_token)
-            if viewer is None:
-                self.send_error(404)
-                return
-            self.set_header("content-type", "text/event-stream")
-            self.set_header("cache-control", "no-cache")
-            must_flush = True
-            wake_event = asyncio.Event()
-            self._wake_up = lambda: self.server.loop.call_soon_threadsafe(
-                wake_event.set
-            )
-            client_id = self.get_query_argument("c")
-            if client_id is None:
-                raise tornado.web.HTTPError(400, "missing client_id")
-            self._closed = False
-
-            watchers = []
-
-            def watch(key: str, state):
-                last_generation = self.get_query_argument(f"g{key}")
-                if last_generation is None:
-                    raise tornado.web.HTTPError(400, f"missing g{key}")
-                watchers.append(
-                    EventStreamStateWatcher(
-                        key=key,
-                        state=state,
-                        client_id=client_id,
-                        wake_up=self._wake_up,
-                        last_generation=last_generation,
-                    )
-                )
-
-            watch("c", viewer.config_state)
-            if hasattr(viewer, "shared_state"):
-                watch("s", viewer.shared_state)
-
-            try:
-                while True:
-                    wake_event.clear()
-                    if self._closed:
-                        break
-                    try:
-                        sent = False
-                        for watcher in watchers:
-                            sent = watcher.maybe_send_update(self) or sent
-                        if sent:
-                            self.flush()
-                            if _IS_GOOGLE_COLAB:
-                                # The proxy used by colab buffers the entire
-                                # response.  Therefore we must end the response for
-                                # the client to receive it.
-                                break
-                        elif must_flush:
-                            self.flush()
-                    except tornado.iostream.StreamClosedError:
-                        break
-                    await wake_event.wait()
-                    must_flush = False
-            finally:
-                for watcher in watchers:
-                    watcher.unregister()
-
-        def on_connection_close(self):
-            if debug:
-                print("connection closed")
-            super().on_connection_close()
-            self._wake_up()
-            self._closed = True
-
-    class SetStateHandler(BaseRequestHandler):
-        def post(self, viewer_token: str):
-            viewer = self.server.viewers.get(viewer_token)
-            if viewer is None:
-                self.send_error(404)
-                return
-            msg = json.loads(self.request.body)
-            prev_generation = msg["pg"]
-            generation = msg["g"]
-            state = msg["s"]
-            client_id = msg["c"]
-            try:
-                new_generation = viewer.set_state(
-                    state,
-                    f"{client_id}/{generation}",
-                    existing_generation=prev_generation,
-                )
-                self.set_header("Content-type", "application/json")
-                self.finish(json.dumps({"g": new_generation}))
-            except ConcurrentModificationError:
-                self.set_status(412)
-                self.finish("")
-
-    class CredentialsHandler(BaseRequestHandler):
-        async def post(self, viewer_token: str):
-            viewer = self.server.viewers.get(viewer_token)
-            if viewer is None:
-                self.send_error(404)
-                return
-            if not viewer.allow_credentials:
-                self.send_error(403)
-                return
-            if self.server._credentials_manager is None:
-                from .default_credentials_manager import default_credentials_manager
-
-                self.server._credentials_manager = default_credentials_manager
-            msg = json.loads(self.request.body)
-            invalid = msg.get("invalid")
-            provider = self.server._credentials_manager.get(
-                msg["key"], msg.get("parameters")
-            )
-            if provider is None:
-                self.send_error(400)
-                return
-            try:
-                credentials = await asyncio.wrap_future(provider.get(invalid))
-                self.set_header("Content-type", "application/json")
-                self.finish(json.dumps(credentials))
-            except Exception:
-                import traceback
-
-                traceback.print_exc()
-                self.send_error(401)
-
-    class VolumeInfoHandler(BaseRequestHandler):
-        def get(self, token):
-            vol = self.server.get_volume(token)
-            if vol is None or not isinstance(vol, local_volume.LocalVolume):
-                self.send_error(404)
-                return
-            self.finish(json.dumps(vol.info(), default=json_encoder_default).encode())
-
-    class SkeletonInfoHandler(BaseRequestHandler):
-        def get(self, token):
-            vol = self.server.get_volume(token)
-            if vol is None or not isinstance(vol, skeleton.SkeletonSource):
-                self.send_error(404)
-                return
-            self.finish(json.dumps(vol.info(), default=json_encoder_default).encode())
-
-    class SubvolumeHandler(BaseRequestHandler):
-        async def get(self, data_format, token, scale_key, start, end):
-            start_pos = np.array(start.split(","), dtype=np.int64)
-            end_pos = np.array(end.split(","), dtype=np.int64)
-            vol = self.server.get_volume(token)
-            if vol is None or not isinstance(vol, local_volume.LocalVolume):
-                self.send_error(404)
-                return
-
-            try:
-                data, content_type = await asyncio.wrap_future(
-                    self.server.executor.submit(
-                        vol.get_encoded_subvolume,
-                        data_format=data_format,
-                        start=start_pos,
-                        end=end_pos,
-                        scale_key=scale_key,
-                    )
-                )
-            except ValueError as e:
-                self.send_error(400, message=e.args[0])
-                return
-            self.set_header("Content-type", content_type)
-            self.finish(data)
-
-    class MeshHandler(BaseRequestHandler):
-        async def get(self, key, object_id):
-            object_id = int(object_id)
-            vol = self.server.get_volume(key)
-            if vol is None or not isinstance(vol, local_volume.LocalVolume):
-                self.send_error(404)
-                return
-
-            try:
-                encoded_mesh = await asyncio.wrap_future(
-                    self.server.executor.submit(vol.get_object_mesh, object_id)
-                )
-            except local_volume.MeshImplementationNotAvailable:
-                self.send_error(501, message="Mesh implementation not available")
-                return
-            except local_volume.MeshesNotSupportedForVolume:
-                self.send_error(405, message="Meshes not supported for volume")
-                return
-            except local_volume.InvalidObjectIdForMesh:
-                self.send_error(
-                    404, message="Mesh not available for specified object id"
-                )
-                return
-            except ValueError as e:
-                self.send_error(400, message=e.args[0])
-                return
-
-            self.set_header("Content-type", "application/octet-stream")
-            self.finish(encoded_mesh)
-
-    class SkeletonHandler(BaseRequestHandler):
-        async def get(self, key, object_id):
-            object_id = int(object_id)
-            vol = self.server.get_volume(key)
-            if vol is None or not isinstance(vol, skeleton.SkeletonSource):
-                self.send_error(404)
-                return
-
-            def get_encoded_skeleton(skeletons, object_id):
-                skeleton = skeletons.get_skeleton(object_id)
-                if skeleton is None:
-                    return None
-                return skeleton.encode(skeletons)
-
-            try:
-                encoded_skeleton = await asyncio.wrap_future(
-                    self.server.executor.submit(get_encoded_skeleton, vol, object_id)
-                )
-            except Exception as e:
-                self.send_error(500, message=e.args[0])
-                return
-            if encoded_skeleton is None:
-                self.send_error(
-                    404, message="Skeleton not available for specified object id"
-                )
-                return
-            self.set_header("Content-type", "application/octet-stream")
-            self.finish(encoded_skeleton)
-
-    global_server = None
-    _global_server_lock = threading.Lock()
-
-    def _get_server_token():
-        with _global_server_lock:
-            if global_server is not None:
-                return global_server.token
+class Server(async_util.BackgroundTornadoServer):
+    def __init__(self, bind_address="127.0.0.1", bind_port=0, token=None):
+        super().__init__(daemon=True)
+        self.viewers = weakref.WeakValueDictionary()
+        self._bind_address = bind_address
+        self._bind_port = bind_port
+        if token is None:
             token = make_random_token()
-            global_server_args.update(token=token)
-            return token
-
-    def set_static_content_source(*args, **kwargs):
-        """Specifies the Neuroglancer client hosted by the Python integration webserver.
-
-        Group:
-          server
-        """
-        global global_static_content_source
-        global_static_content_source = static.get_static_content_source(*args, **kwargs)
-
-    def set_dev_server_content_source():
-        """Builds the Neuroglancer client from source on demand for the Python integration.
-
-        Group:
-          Server
-        """
-        static_content_url = None
-        root_dir = os.path.join(os.path.dirname(__file__), "..", "..")
-        build_process = subprocess.Popen(
-            [
-                "npm",
-                "run",
-                "dev-server-python",
-                "--",
-                "--port=0",
-            ],
-            cwd=root_dir,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            encoding="utf-8",
+        self.token = token
+        self.executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=multiprocessing.cpu_count()
         )
 
+    def _attempt_to_start_server(self):
+        def log_function(handler):
+            if debug:
+                print(
+                    "%d %s %.2fs"
+                    % (
+                        handler.get_status(),
+                        handler.request.uri,
+                        handler.request.request_time(),
+                    )
+                )
+
+        app = self.app = tornado.web.Application(
+            [
+                (STATIC_PATH_REGEX, StaticPathHandler, dict(server=self)),
+                (INFO_PATH_REGEX, VolumeInfoHandler, dict(server=self)),
+                (SKELETON_INFO_PATH_REGEX, SkeletonInfoHandler, dict(server=self)),
+                (DATA_PATH_REGEX, SubvolumeHandler, dict(server=self)),
+                (SKELETON_PATH_REGEX, SkeletonHandler, dict(server=self)),
+                (MESH_PATH_REGEX, MeshHandler, dict(server=self)),
+                (ACTION_PATH_REGEX, ActionHandler, dict(server=self)),
+                (
+                    VOLUME_INFO_RESPONSE_PATH_REGEX,
+                    VolumeInfoResponseHandler,
+                    dict(server=self),
+                ),
+                (
+                    VOLUME_CHUNK_RESPONSE_PATH_REGEX,
+                    VolumeChunkResponseHandler,
+                    dict(server=self),
+                ),
+                (EVENTS_PATH_REGEX, EventStreamHandler, dict(server=self)),
+                (SET_STATE_PATH_REGEX, SetStateHandler, dict(server=self)),
+                (CREDENTIALS_PATH_REGEX, CredentialsHandler, dict(server=self)),
+            ],
+            log_function=log_function,
+        )
+        self.http_server = tornado.httpserver.HTTPServer(
+            app,
+            # Allow very large requests to accommodate large screenshots.
+            max_buffer_size=1024**3,
+        )
+        sockets = tornado.netutil.bind_sockets(
+            port=self._bind_port, address=self._bind_address
+        )
+        self.http_server.add_sockets(sockets)
+        actual_port = sockets[0].getsockname()[1]
+
+        global global_static_content_source
+        if global_static_content_source is None:
+            global_static_content_source = static.get_default_static_content_source()
+        self.port = actual_port
+        self.server_url = _get_server_url(self._bind_address, actual_port)
+        self.regular_server_url = _get_regular_server_url(
+            self._bind_address, actual_port
+        )
+        self._credentials_manager = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.stop()
+
+    def get_volume(self, key):
+        dot_index = key.find(".")
+        if dot_index == -1:
+            return None
+        viewer_token = key[:dot_index]
+        volume_token = key[dot_index + 1 :]
+        viewer = self.viewers.get(viewer_token)
+        if viewer is None:
+            return None
+        return viewer.volume_manager.volumes.get(volume_token)
+
+
+class BaseRequestHandler(tornado.web.RequestHandler):
+    def initialize(self, server):
+        self.server = server
+
+
+class StaticPathHandler(BaseRequestHandler):
+    def get(self, viewer_token, path):
+        if (
+            viewer_token != self.server.token
+            and viewer_token not in self.server.viewers
+        ):
+            self.send_error(404)
+            return
         try:
-            future = concurrent.futures.Future()
+            query = self.request.query
+            if query:
+                query = f"?{query}"
+            data, content_type = global_static_content_source.get(path, query)
+        except ValueError as e:
+            self.send_error(404, message=e.args[0])
+            return
+        self.set_header("Content-type", content_type)
+        self.finish(data)
 
-            def thread_func(f):
-                url = None
-                for line in f:
-                    print(f"[dev-server] {line.rstrip()}")
-                    if url is None:
-                        m = re.search(r"http://[^\s,]+", line)
-                        if m is not None:
-                            url = m.group(0)
-                            future.set_result(url)
+
+class ActionHandler(BaseRequestHandler):
+    def post(self, viewer_token):
+        viewer = self.server.viewers.get(viewer_token)
+        if viewer is None:
+            self.send_error(404)
+            return
+        action = json.loads(self.request.body)
+        self.server.loop.call_soon(
+            viewer.actions.invoke, action["action"], action["state"]
+        )
+        self.finish("")
+
+
+class VolumeInfoResponseHandler(BaseRequestHandler):
+    def post(self, viewer_token, request_id):
+        viewer = self.server.viewers.get(viewer_token)
+        if viewer is None:
+            self.send_error(404)
+            return
+
+        info = json.loads(self.request.body)
+        self.server.loop.call_soon(viewer._handle_volume_info_reply, request_id, info)
+        self.finish("")
+
+
+class VolumeChunkResponseHandler(BaseRequestHandler):
+    def post(self, viewer_token, request_id):
+        viewer = self.server.viewers.get(viewer_token)
+        if viewer is None:
+            self.send_error(404)
+            return
+
+        params = json.loads(self.get_argument("p"))
+        data = self.request.body
+        self.server.loop.call_soon(
+            viewer._handle_volume_chunk_reply, request_id, params, data
+        )
+        self.finish("")
+
+
+class EventStreamStateWatcher:
+    def __init__(self, key: str, client_id: str, state, last_generation: str, wake_up):
+        self.key = key
+        self.state = state
+        self.last_generation = last_generation
+        self._wake_up = wake_up
+        self._client_id = client_id
+        state.add_changed_callback(wake_up)
+
+    def unregister(self):
+        self.state.remove_changed_callback(self._wake_up)
+
+    def maybe_send_update(self, handler):
+        raw_state, generation = self.state.raw_state_and_generation
+        if generation == self.last_generation:
+            return False
+        if generation.startswith(self._client_id + "/"):
+            return False
+        self.last_generation = generation
+        msg = {"k": self.key, "s": raw_state, "g": generation}
+        handler.write(f"data: {encode_json(msg)}\n\n")
+        if debug:
+            print(f"data: {encode_json(msg)}\n\n")
+        return True
+
+
+class EventStreamHandler(BaseRequestHandler):
+    async def get(self, viewer_token: str):
+        viewer = self.server.viewers.get(viewer_token)
+        if viewer is None:
+            self.send_error(404)
+            return
+        self.set_header("content-type", "text/event-stream")
+        self.set_header("cache-control", "no-cache")
+        must_flush = True
+        wake_event = asyncio.Event()
+        self._wake_up = lambda: self.server.loop.call_soon_threadsafe(wake_event.set)
+        client_id = self.get_query_argument("c")
+        if client_id is None:
+            raise tornado.web.HTTPError(400, "missing client_id")
+        self._closed = False
+
+        watchers = []
+
+        def watch(key: str, state):
+            last_generation = self.get_query_argument(f"g{key}")
+            if last_generation is None:
+                raise tornado.web.HTTPError(400, f"missing g{key}")
+            watchers.append(
+                EventStreamStateWatcher(
+                    key=key,
+                    state=state,
+                    client_id=client_id,
+                    wake_up=self._wake_up,
+                    last_generation=last_generation,
+                )
+            )
+
+        watch("c", viewer.config_state)
+        if hasattr(viewer, "shared_state"):
+            watch("s", viewer.shared_state)
+
+        try:
+            while True:
+                wake_event.clear()
+                if self._closed:
+                    break
+                try:
+                    sent = False
+                    for watcher in watchers:
+                        sent = watcher.maybe_send_update(self) or sent
+                    if sent:
+                        self.flush()
+                        if _IS_GOOGLE_COLAB:
+                            # The proxy used by colab buffers the entire
+                            # response.  Therefore we must end the response for
+                            # the client to receive it.
+                            break
+                    elif must_flush:
+                        self.flush()
+                except tornado.iostream.StreamClosedError:
+                    break
+                await wake_event.wait()
+                must_flush = False
+        finally:
+            for watcher in watchers:
+                watcher.unregister()
+
+    def on_connection_close(self):
+        if debug:
+            print("connection closed")
+        super().on_connection_close()
+        self._wake_up()
+        self._closed = True
+
+
+class SetStateHandler(BaseRequestHandler):
+    def post(self, viewer_token: str):
+        viewer = self.server.viewers.get(viewer_token)
+        if viewer is None:
+            self.send_error(404)
+            return
+        msg = json.loads(self.request.body)
+        prev_generation = msg["pg"]
+        generation = msg["g"]
+        state = msg["s"]
+        client_id = msg["c"]
+        try:
+            new_generation = viewer.set_state(
+                state, f"{client_id}/{generation}", existing_generation=prev_generation
+            )
+            self.set_header("Content-type", "application/json")
+            self.finish(json.dumps({"g": new_generation}))
+        except ConcurrentModificationError:
+            self.set_status(412)
+            self.finish("")
+
+
+class CredentialsHandler(BaseRequestHandler):
+    async def post(self, viewer_token: str):
+        viewer = self.server.viewers.get(viewer_token)
+        if viewer is None:
+            self.send_error(404)
+            return
+        if not viewer.allow_credentials:
+            self.send_error(403)
+            return
+        if self.server._credentials_manager is None:
+            from .default_credentials_manager import default_credentials_manager
+
+            self.server._credentials_manager = default_credentials_manager
+        msg = json.loads(self.request.body)
+        invalid = msg.get("invalid")
+        provider = self.server._credentials_manager.get(
+            msg["key"], msg.get("parameters")
+        )
+        if provider is None:
+            self.send_error(400)
+            return
+        try:
+            credentials = await asyncio.wrap_future(provider.get(invalid))
+            self.set_header("Content-type", "application/json")
+            self.finish(json.dumps(credentials))
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            self.send_error(401)
+
+
+class VolumeInfoHandler(BaseRequestHandler):
+    def get(self, token):
+        vol = self.server.get_volume(token)
+        if vol is None or not isinstance(vol, local_volume.LocalVolume):
+            self.send_error(404)
+            return
+        self.finish(json.dumps(vol.info(), default=json_encoder_default).encode())
+
+
+class SkeletonInfoHandler(BaseRequestHandler):
+    def get(self, token):
+        vol = self.server.get_volume(token)
+        if vol is None or not isinstance(vol, skeleton.SkeletonSource):
+            self.send_error(404)
+            return
+        self.finish(json.dumps(vol.info(), default=json_encoder_default).encode())
+
+
+class SubvolumeHandler(BaseRequestHandler):
+    async def get(self, data_format, token, scale_key, start, end):
+        start_pos = np.array(start.split(","), dtype=np.int64)
+        end_pos = np.array(end.split(","), dtype=np.int64)
+        vol = self.server.get_volume(token)
+        if vol is None or not isinstance(vol, local_volume.LocalVolume):
+            self.send_error(404)
+            return
+
+        try:
+            data, content_type = await asyncio.wrap_future(
+                self.server.executor.submit(
+                    vol.get_encoded_subvolume,
+                    data_format=data_format,
+                    start=start_pos,
+                    end=end_pos,
+                    scale_key=scale_key,
+                )
+            )
+        except ValueError as e:
+            self.send_error(400, message=e.args[0])
+            return
+        self.set_header("Content-type", content_type)
+        self.finish(data)
+
+
+class MeshHandler(BaseRequestHandler):
+    async def get(self, key, object_id):
+        object_id = int(object_id)
+        vol = self.server.get_volume(key)
+        if vol is None or not isinstance(vol, local_volume.LocalVolume):
+            self.send_error(404)
+            return
+
+        try:
+            encoded_mesh = await asyncio.wrap_future(
+                self.server.executor.submit(vol.get_object_mesh, object_id)
+            )
+        except local_volume.MeshImplementationNotAvailable:
+            self.send_error(501, message="Mesh implementation not available")
+            return
+        except local_volume.MeshesNotSupportedForVolume:
+            self.send_error(405, message="Meshes not supported for volume")
+            return
+        except local_volume.InvalidObjectIdForMesh:
+            self.send_error(404, message="Mesh not available for specified object id")
+            return
+        except ValueError as e:
+            self.send_error(400, message=e.args[0])
+            return
+
+        self.set_header("Content-type", "application/octet-stream")
+        self.finish(encoded_mesh)
+
+
+class SkeletonHandler(BaseRequestHandler):
+    async def get(self, key, object_id):
+        object_id = int(object_id)
+        vol = self.server.get_volume(key)
+        if vol is None or not isinstance(vol, skeleton.SkeletonSource):
+            self.send_error(404)
+            return
+
+        def get_encoded_skeleton(skeletons, object_id):
+            skeleton = skeletons.get_skeleton(object_id)
+            if skeleton is None:
+                return None
+            return skeleton.encode(skeletons)
+
+        try:
+            encoded_skeleton = await asyncio.wrap_future(
+                self.server.executor.submit(get_encoded_skeleton, vol, object_id)
+            )
+        except Exception as e:
+            self.send_error(500, message=e.args[0])
+            return
+        if encoded_skeleton is None:
+            self.send_error(
+                404, message="Skeleton not available for specified object id"
+            )
+            return
+        self.set_header("Content-type", "application/octet-stream")
+        self.finish(encoded_skeleton)
+
+
+global_server = None
+_global_server_lock = threading.Lock()
+
+
+def _get_server_token():
+    with _global_server_lock:
+        if global_server is not None:
+            return global_server.token
+        token = make_random_token()
+        global_server_args.update(token=token)
+        return token
+
+
+def set_static_content_source(*args, **kwargs):
+    """Specifies the Neuroglancer client hosted by the Python integration webserver.
+
+    Group:
+      server
+    """
+    global global_static_content_source
+    global_static_content_source = static.get_static_content_source(*args, **kwargs)
+
+
+def set_dev_server_content_source():
+    """Builds the Neuroglancer client from source on demand for the Python integration.
+
+    Group:
+      Server
+    """
+    static_content_url = None
+    root_dir = os.path.join(os.path.dirname(__file__), "..", "..")
+    build_process = subprocess.Popen(
+        [
+            "npm",
+            "run",
+            "dev-server-python",
+            "--",
+            "--port=0",
+        ],
+        cwd=root_dir,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+    )
+
+    try:
+        future = concurrent.futures.Future()
+
+        def thread_func(f):
+            url = None
+            for line in f:
+                print(f"[dev-server] {line.rstrip()}")
                 if url is None:
-                    future.set_result(None)
+                    m = re.search(r"http://[^\s,]+", line)
+                    if m is not None:
+                        url = m.group(0)
+                        future.set_result(url)
+            if url is None:
+                future.set_result(None)
 
-            thread = threading.Thread(target=thread_func, args=(build_process.stdout,))
-            thread.daemon = True
-            thread.start()
+        thread = threading.Thread(target=thread_func, args=(build_process.stdout,))
+        thread.daemon = True
+        thread.start()
 
-            static_content_url = future.result(timeout=10)
-        except:
-            build_process.terminate()
-            raise
+        static_content_url = future.result(timeout=10)
+    except:
+        build_process.terminate()
+        raise
 
-        set_static_content_source(url=static_content_url)
+    set_static_content_source(url=static_content_url)
 
-    def set_server_bind_address(bind_address=None, bind_port=0):
-        """Sets the bind adress and port for the Python integration webserver.
 
-        If the server is already running, this does not have any effect until the server is
-        restarted.
+def set_server_bind_address(bind_address=None, bind_port=0):
+    """Sets the bind adress and port for the Python integration webserver.
 
-        Group:
-          Server
+    If the server is already running, this does not have any effect until the server is
+    restarted.
 
-        """
-        if bind_address is None:
-            bind_address = "127.0.0.1"
-        with _global_server_lock:
-            global_server_args.update(bind_address=bind_address, bind_port=bind_port)
+    Group:
+      Server
 
-    def is_server_running() -> bool:
-        """Returns ``True`` if the Python integration webserver is running.
+    """
+    if bind_address is None:
+        bind_address = "127.0.0.1"
+    with _global_server_lock:
+        global_server_args.update(bind_address=bind_address, bind_port=bind_port)
 
-        Group:
-          Server
-        """
-        with _global_server_lock:
-            return global_server is not None
 
-    def stop() -> None:
-        """Stop the server, invalidating any viewer URLs.
+def is_server_running() -> bool:
+    """Returns ``True`` if the Python integration webserver is running.
 
-        This allows any previously-referenced data arrays to be garbage collected if there are no
-        other references to them.
+    Group:
+      Server
+    """
+    with _global_server_lock:
+        return global_server is not None
 
-        Group:
-          server
-        """
-        global global_server
-        with _global_server_lock:
-            server = global_server
-            global_server = None
-        if server is not None:
-            server.stop()
 
-    def get_server_url() -> str:
-        if global_server is None:
-            raise ValueError("Server is not started")
-        return global_server.server_url
+def stop() -> None:
+    """Stop the server, invalidating any viewer URLs.
 
-    def start() -> None:
-        """Starts the Python integration webserver if not already started.
+    This allows any previously-referenced data arrays to be garbage collected if there are no other
+    references to them.
 
-        Group:
-          Server
-        """
-        global global_server
-        with _global_server_lock:
-            if global_server is not None:
-                return
+    Group:
+      server
+    """
+    global global_server
+    with _global_server_lock:
+        server = global_server
+        global_server = None
+    if server is not None:
+        server.stop()
 
-            # Workaround https://bugs.python.org/issue37373
-            # https://www.tornadoweb.org/en/stable/index.html#installation
-            if sys.platform == "win32" and sys.version_info >= (3, 8):
-                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-            global_server = Server(**global_server_args)
 
-    def register_viewer(viewer):
-        start()
-        global_server.viewers[viewer.token] = viewer
+def get_server_url() -> str:
+    if global_server is None:
+        raise ValueError("Server is not started")
+    return global_server.server_url
 
-    def defer_callback(callback, *args, **kwargs):
-        """Register `callback` to run in the server event loop thread.
 
-        Group:
-          Server
-        """
-        start()
-        global_server.loop.call_soon_threadsafe(lambda: callback(*args, **kwargs))
+def start() -> None:
+    """Starts the Python integration webserver if not already started.
 
-else:
-    # Pyodide mode: delegate to browser_server
+    Group:
+      Server
+    """
+    global global_server
+    with _global_server_lock:
+        if global_server is not None:
+            return
 
-    def set_static_content_source(*args, **kwargs):
-        pass  # Not applicable in Pyodide mode
+        # Workaround https://bugs.python.org/issue37373
+        # https://www.tornadoweb.org/en/stable/index.html#installation
+        if sys.platform == "win32" and sys.version_info >= (3, 8):
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        global_server = Server(**global_server_args)
 
-    def set_dev_server_content_source():
-        pass  # Not applicable in Pyodide mode
 
-    def set_server_bind_address(bind_address=None, bind_port=0):
-        pass  # Not applicable in Pyodide mode
+def register_viewer(viewer):
+    start()
+    global_server.viewers[viewer.token] = viewer
 
-    def is_server_running() -> bool:
-        return True  # Always "running" in Pyodide mode
 
-    def stop() -> None:
-        pass  # Not applicable in Pyodide mode
+def defer_callback(callback, *args, **kwargs):
+    """Register `callback` to run in the server event loop thread.
 
-    def get_server_url() -> str:
-        return ""  # Base URL is the page itself
-
-    def start() -> None:
-        pass  # No-op; browser_server is initialized elsewhere
-
-    def register_viewer(viewer):
-        from . import browser_server
-
-        browser_server.get_browser_server().register_viewer(viewer)
-
-    def defer_callback(callback, *args, **kwargs):
-        """Register `callback` to run via JS setTimeout (Pyodide mode).
-
-        Group:
-          Server
-        """
-        import js  # type: ignore[import]
-        from pyodide.ffi import create_proxy  # type: ignore[import]
-
-        js.setTimeout(create_proxy(lambda: callback(*args, **kwargs)), 0)
+    Group:
+      Server
+    """
+    start()
+    global_server.loop.call_soon_threadsafe(lambda: callback(*args, **kwargs))

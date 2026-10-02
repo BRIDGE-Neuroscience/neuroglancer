@@ -8,27 +8,9 @@
       "target": "ng-wizard-demo",
       "public": "dist/client"
     },
-    {
+     {
       "target": "ng-zarr-vectors",
       "public": "dist/client"
-    },
-    {
-      "target": "ng-pyodide",
-      "public": "dist/pyodide",
-      "//": "COOP/COEP (cross-origin isolation) are deliberately NOT set here. The Pyodide runtime is single-threaded (no SharedArrayBuffer use anywhere in src/, loadPyodide requests no pthreads) and JSPI does not need isolation, so isolation buys nothing here -- and its COOP:same-origin severs window.opener, which the middleauth (CAVE) sign-in popup needs to save exports to GCS. Re-verify Pyodide 314 + JSPI still load un-isolated in target browsers if this is ever revisited.",
-      "//rewrites": "The app moves itself to /v/pyodide/ at boot so share links look like /v/pyodide/#!{state}. Serve index.html for those (and any other) non-file paths so a pasted share link loads the app shell instead of 404ing.",
-      "rewrites": [{ "source": "**", "destination": "/index.html" }],
-      "headers": [
-        {
-          "source": "/@(index.html|pyodide_sw.js|neuroglancer_pyodide.zip|*.py)",
-          "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
-        },
-        {
-          "//": "The /v/** paths are rewritten to index.html; match by request path so that shell is never cached (headers match the request, not the rewrite target).",
-          "source": "/v/**",
-          "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
-        }
-      ]
     },
     {
       "target": "docs",

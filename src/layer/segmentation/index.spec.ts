@@ -38,14 +38,10 @@ const { SegmentationUserLayer } = await import(
   "#src/layer/segmentation/index.js"
 );
 
-const { displaySpatialSkeletonSelection } = await import(
-  "#src/layer/segmentation/spatial_skeleton_selection.js"
-);
-
 const {
   PerspectiveViewSpatiallyIndexedSkeletonLayer,
   SliceViewPanelSpatiallyIndexedSkeletonLayer,
-} = await import("#src/skeleton/spatial_frontend.js");
+} = await import("#src/skeleton/frontend.js");
 
 const { SegmentSelectionState } = await import(
   "#src/segmentation_display_state/frontend.js"
@@ -507,12 +503,7 @@ describe("layer/segmentation spatial skeleton selection serialization", () => {
     };
 
     expect(
-      displaySpatialSkeletonSelection(
-        layer,
-        state as any,
-        parent,
-        context as any,
-      ),
+      (layer as any).displaySpatialSkeletonSelection(state, parent, context),
     ).toBe(true);
 
     expect(parent.textContent).toContain("2836850");

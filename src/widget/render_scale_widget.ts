@@ -73,19 +73,12 @@ export interface RenderScaleWidgetOptions {
    */
   unitOfTarget?: string;
   /**
-   * Called when the user manually changes the target (click/drag or wheel).
-   * Lets a layer turn off any automatic target derivation so the manual choice
-   * sticks — e.g. disabling auto spatial-skeleton grid level selection.
+   * Called when the user manually changes the target (click/drag, wheel,
+   * or reset).  Lets a layer turn off any automatic target derivation so
+   * the manual choice sticks — e.g. disabling auto spatial-skeleton grid
+   * level selection.
    */
   onManualTarget?: () => void;
-  /**
-   * Called when the user RESETS the target.
-   *
-   * The counterpart to {@link onManualTarget}, and the only way back: a layer
-   * that switched to manual on the first drag has no other gesture with which
-   * to say "go back to deciding this for me". Reset is that gesture.
-   */
-  onResetTarget?: () => void;
 }
 
 export class RenderScaleWidget extends RefCounted {
@@ -101,8 +94,6 @@ export class RenderScaleWidget extends RefCounted {
   unitOfTarget = "px";
   /** See {@link RenderScaleWidgetOptions.onManualTarget}. */
   onManualTarget: (() => void) | undefined = undefined;
-  /** See {@link RenderScaleWidgetOptions.onResetTarget}. */
-  onResetTarget: (() => void) | undefined = undefined;
   private ctx = this.canvas.getContext("2d")!;
   hoverTarget = new WatchableValue<[number, number] | undefined>(undefined);
   private throttledUpdateView = this.registerCancellable(
@@ -222,13 +213,6 @@ export class RenderScaleWidget extends RefCounted {
 
   reset() {
     this.hoverTarget.value = undefined;
-    // BEFORE the reset, not after. A layer that derives this target
-    // automatically watches for the value drifting away from what it last wrote
-    // and folds the difference in as a deliberate calibration. Resetting first
-    // would present the default as exactly such a drift, so re-enabling
-    // automatic derivation would immediately bake the default into the
-    // persisted bias -- and the control would come back wrong.
-    this.onResetTarget?.();
     this.target.reset();
   }
 
@@ -548,9 +532,6 @@ export function renderScaleLayerControl<
       }
       if (options.onManualTarget !== undefined) {
         control.onManualTarget = options.onManualTarget;
-      }
-      if (options.onResetTarget !== undefined) {
-        control.onResetTarget = options.onResetTarget;
       }
       return { control, controlElement: control.element };
     },

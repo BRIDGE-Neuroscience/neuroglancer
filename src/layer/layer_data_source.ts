@@ -142,25 +142,6 @@ export function layerDataSourceSpecificationToJson(
   };
 }
 
-/**
- * The saved spec for a subsource, by its current id or by any id it used to be
- * published under (see {@link DataSubsourceEntry.legacyIds}). Without the
- * fallback, renaming a subsource would quietly reset every saved link's
- * enable/disable choice for it.
- */
-function findSubsourceSpec(
-  subsourceSpecs: Map<string, DataSubsourceSpecification>,
-  subsourceEntry: DataSubsourceEntry,
-): DataSubsourceSpecification | undefined {
-  const spec = subsourceSpecs.get(subsourceEntry.id);
-  if (spec !== undefined) return spec;
-  for (const legacyId of subsourceEntry.legacyIds ?? []) {
-    const legacySpec = subsourceSpecs.get(legacyId);
-    if (legacySpec !== undefined) return legacySpec;
-  }
-  return undefined;
-}
-
 export class LoadedDataSubsource {
   subsourceToModelSubspaceTransform: Float32Array;
   modelSubspaceDimensionIndices: number[];
@@ -302,7 +283,7 @@ export class LoadedLayerDataSource extends RefCounted {
         new LoadedDataSubsource(
           this,
           subsourceEntry,
-          findSubsourceSpec(subsourceSpecs, subsourceEntry),
+          subsourceSpecs.get(subsourceEntry.id),
           subsourceIndex,
           this.enableDefaultSubsources,
         ),

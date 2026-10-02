@@ -209,10 +209,6 @@ export interface SegmentationDisplayState {
   hideSegmentZero: WatchableValueInterface<boolean>;
   segmentColorHash: WatchableValueInterface<number>;
   segmentStatedColors: WatchableValueInterface<Uint64Map>;
-  // The stated colors actually used for rendering: the user's `segmentStatedColors`
-  // overlaid on top of any colors declared by an `rgb` segment property map (LUT).
-  // Falls back to `segmentStatedColors` when absent or when the map has no colors.
-  effectiveSegmentStatedColors?: WatchableValueInterface<Uint64Map>;
   tempSegmentStatedColors2d: WatchableValueInterface<Uint64Map>;
   useTempSegmentStatedColors2d: WatchableValueInterface<boolean>;
   segmentDefaultColor: WatchableValueInterface<vec3 | undefined>;
@@ -1071,15 +1067,12 @@ export function getBaseObjectColor(
     return color;
   }
   const colorGroupState = displayState.segmentationColorGroupState.value;
-  // Prefer the effective map (user stated colors overlaid on the LUT) when the
-  // layer provides one; otherwise fall back to the raw user stated colors.
-  const segmentStatedColors =
-    displayState.effectiveSegmentStatedColors?.value ??
-    colorGroupState.segmentStatedColors;
+  const { segmentStatedColors } = colorGroupState;
   let statedColor: bigint | undefined;
   if (
     segmentStatedColors.size !== 0 &&
-    (statedColor = segmentStatedColors.get(objectId)) !== undefined
+    (statedColor = colorGroupState.segmentStatedColors.get(objectId)) !==
+      undefined
   ) {
     // If displayState maps the ID to a color, use it
     color[0] = Number(statedColor & 0x0000ffn) / 255.0;

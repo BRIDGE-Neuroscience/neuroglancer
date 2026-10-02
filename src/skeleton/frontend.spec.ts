@@ -14,7 +14,11 @@
  * limitations under the License.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import { Uint64Set } from "#src/uint64_set.js";
+import { mat4 } from "#src/util/geom.js";
+import { DataType } from "#src/util/data_type.js";
 
 if (!("WebGL2RenderingContext" in globalThis)) {
   Object.defineProperty(globalThis, "WebGL2RenderingContext", {
@@ -30,41 +34,360 @@ if (!("WebGL2RenderingContext" in globalThis)) {
   });
 }
 
-const { isUnsafeBareAttributeAlias } = await import(
-  "#src/skeleton/frontend.js"
-);
+const {
+  SpatiallyIndexedSkeletonLayer,
+  getSpatialSkeletonCellKeyPrefix,
+  resolveSpatiallyIndexedSkeletonSegmentPick,
+  computeDiagonalModelToGlobalMetersScale,
+  maybeUpdateAutoSpatialSkeletonGridResolutionTarget,
+} = await import("#src/skeleton/frontend.js");
 
-describe("isUnsafeBareAttributeAlias", () => {
-  it("withholds the bare alias for swizzle-shaped attribute names", () => {
-    // The real case: a tractogram shipping a per-vertex `z`. `#define z` is
-    // preprocessor-level, so it rewrote `d.z` in the colour-by-direction
-    // default into a member that does not exist -- the shader failed to
-    // compile and the layer fell back to per-object hash colours.
-    for (const name of ["x", "y", "z", "w", "r", "g", "b", "a", "s", "t"]) {
-      expect(isUnsafeBareAttributeAlias(name)).toBe(true);
+describe("resolveSpatiallyIndexedSkeletonSegmentPick", () => {
+  it("returns the node segment id (bigint) for direct node picks (1-component)", () => {
+    const chunk = {
+      indices: new Uint32Array([0, 1, 1, 2]),
+      numVertices: 3,
+    };
+    const segmentIds = new Uint32Array([11, 13, 17]);
+
+    expect(
+      resolveSpatiallyIndexedSkeletonSegmentPick(chunk, segmentIds, 1, "node"),
+    ).toBe(13n);
+  });
+
+  it("returns the first valid endpoint segment id for direct edge picks", () => {
+    const chunk = {
+      indices: new Uint32Array([0, 1, 1, 2]),
+      numVertices: 3,
+    };
+    const segmentIds = new Uint32Array([0, 19, 23]);
+
+    expect(
+      resolveSpatiallyIndexedSkeletonSegmentPick(chunk, segmentIds, 0, "edge"),
+    ).toBe(19n);
+    expect(
+      resolveSpatiallyIndexedSkeletonSegmentPick(chunk, segmentIds, 1, "edge"),
+    ).toBe(19n);
+  });
+
+  it("reconstructs a FULL uint64 (>2^32) id from a 2-component [lo,hi] column", () => {
+    // Flywire-scale id 720575940612786691 = lo 0x0DE2_2603, hi 0x0A00_0002.
+    const id = 720575940612786691n;
+    const lo = Number(id & 0xffffffffn) >>> 0;
+    const hi = Number((id >> 32n) & 0xffffffffn) >>> 0;
+    const chunk = {
+      indices: new Uint32Array([0, 1, 1, 2]),
+      numVertices: 3,
+    };
+    // interleaved [lo, hi] per vertex; vertex 1 carries the id.
+    const segmentIds = new Uint32Array([0, 0, lo, hi, 0, 0]);
+    expect(
+      resolveSpatiallyIndexedSkeletonSegmentPick(
+        chunk,
+        segmentIds,
+        1,
+        "node",
+        2,
+      ),
+    ).toBe(id);
+    // edge (0,1): first endpoint (vertex 0) is empty → falls back to vertex 1.
+    expect(
+      resolveSpatiallyIndexedSkeletonSegmentPick(
+        chunk,
+        segmentIds,
+        0,
+        "edge",
+        2,
+      ),
+    ).toBe(id);
+  });
+
+  it("returns undefined for out-of-range direct picks", () => {
+    const chunk = {
+      indices: new Uint32Array([0, 1]),
+      numVertices: 2,
+    };
+    const segmentIds = new Uint32Array([5, 7]);
+
+    expect(
+      resolveSpatiallyIndexedSkeletonSegmentPick(chunk, segmentIds, 4, "node"),
+    ).toBeUndefined();
+    expect(
+      resolveSpatiallyIndexedSkeletonSegmentPick(chunk, segmentIds, 2, "edge"),
+    ).toBeUndefined();
+  });
+});
+
+describe("SpatiallyIndexedSkeletonLayer browse node picks", () => {
+  it("resolves browse node picks with node id and source state", () => {
+    const positions = new Float32Array([1, 2, 3, 4, 5, 6]);
+    const segmentIds = new Uint32Array([11, 17]);
+    const vertexBytes = new Uint8Array(
+      positions.byteLength + segmentIds.byteLength,
+    );
+    vertexBytes.set(new Uint8Array(positions.buffer), 0);
+    vertexBytes.set(new Uint8Array(segmentIds.buffer), positions.byteLength);
+    const chunk = {
+      vertexAttributes: vertexBytes,
+      vertexAttributeOffsets: new Uint32Array([0, positions.byteLength]),
+      numVertices: 2,
+      indices: new Uint32Array([0, 1]),
+      nodeIds: new Int32Array([101, 202]),
+      nodeSourceStates: [
+        { revisionToken: "2026-03-29T11:50:00Z" },
+        { revisionToken: "2026-03-29T11:51:00Z" },
+      ],
+    };
+    const layer = Object.create(SpatiallyIndexedSkeletonLayer.prototype);
+    // The pick path locates the "segment" column by attribute index; provide
+    // the [position, segment(uint32)] layout matching the packed bytes above.
+    (layer as any).vertexAttributes = [
+      { name: "position", dataType: DataType.FLOAT32, numComponents: 3 },
+      { name: "segment", dataType: DataType.UINT32, numComponents: 1 },
+    ];
+
+    expect((layer as any).resolveNodePickFromChunk(chunk, 1)).toEqual({
+      nodeId: 202,
+      segmentId: 17n,
+      position: new Float32Array([4, 5, 6]),
+      sourceState: { revisionToken: "2026-03-29T11:51:00Z" },
+    });
+  });
+});
+
+describe("SpatiallyIndexedSkeletonLayer targeted source invalidation", () => {
+  it("computes absolute half-open cell prefixes without lower-bound offsets", () => {
+    expect(
+      getSpatialSkeletonCellKeyPrefix(
+        new Float32Array([100, 200, 300]),
+        new Float32Array([100, 100, 100]),
+      ),
+    ).toBe("1,2,3:");
+    expect(
+      getSpatialSkeletonCellKeyPrefix(
+        new Float32Array([99.999, 199.999, 299.999]),
+        new Float32Array([100, 100, 100]),
+      ),
+    ).toBe("0,1,2:");
+  });
+
+  it("dedupes cell prefixes per unique source entry", () => {
+    const invalidateCacheKeyPrefixes = vi.fn();
+    const source = {
+      spec: {
+        chunkDataSize: new Float32Array([100, 100, 100]),
+        lowerChunkBound: new Float32Array([10, 20, 30]),
+      },
+      invalidateCacheKeyPrefixes,
+    };
+    const source2d = {
+      spec: {
+        chunkDataSize: new Float32Array([50, 50, 50]),
+      },
+      invalidateCacheKeyPrefixes: vi.fn(),
+    };
+    const redrawNeeded = { dispatch: vi.fn() };
+    const layer = {
+      sources: [{ chunkSource: source }, { chunkSource: source }],
+      sources2d: [{ chunkSource: source2d }],
+      redrawNeeded,
+    };
+
+    const invalidated =
+      SpatiallyIndexedSkeletonLayer.prototype.invalidateSourceCellsForPositions.call(
+        layer,
+        [
+          new Float32Array([100, 200, 300]),
+          new Float32Array([199.999, 200, 300]),
+          new Float32Array([100, 200, 300]),
+        ],
+      );
+
+    expect(invalidated).toBe(true);
+    expect(invalidateCacheKeyPrefixes).toHaveBeenCalledTimes(1);
+    expect([...invalidateCacheKeyPrefixes.mock.calls[0][0]]).toEqual([
+      "1,2,3:",
+    ]);
+    expect(source2d.invalidateCacheKeyPrefixes).toHaveBeenCalledTimes(1);
+    expect([...source2d.invalidateCacheKeyPrefixes.mock.calls[0][0]]).toEqual([
+      "2,4,6:",
+      "3,4,6:",
+    ]);
+    expect(redrawNeeded.dispatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SpatiallyIndexedSkeletonLayer browse exclusions", () => {
+  it("includes suppressed browse segments even when no overlay segment is loaded", () => {
+    const layer = Object.assign(
+      Object.create(SpatiallyIndexedSkeletonLayer.prototype),
+      {
+        suppressedBrowseSegmentIds: new Set<number>(),
+        browseExcludedSegments: new Uint64Set(),
+        browseExcludedSegmentsKey: undefined,
+        redrawNeeded: { dispatch: vi.fn() },
+        getLoadedOverlaySegmentIds: () => [],
+      },
+    );
+
+    expect(layer.suppressBrowseSegment(29)).toBe(true);
+    expect(layer.redrawNeeded.dispatch).toHaveBeenCalledTimes(1);
+
+    const excludedSegments = (layer as any).getBrowsePassExcludedSegments();
+    expect(excludedSegments).toBeInstanceOf(Uint64Set);
+    expect([...excludedSegments]).toEqual([29n]);
+  });
+});
+
+function makeIdentityMappedTransform(modelToRenderLayerTransform: Float32Array) {
+  return {
+    rank: 3,
+    unpaddedRank: 3,
+    localToRenderLayerDimensions: [0, 1, 2],
+    globalToRenderLayerDimensions: [0, 1, 2],
+    channelToRenderLayerDimensions: [],
+    channelToModelDimensions: [],
+    channelSpaceShape: new Uint32Array(0),
+    modelToRenderLayerTransform,
+    modelDimensionNames: ["x", "y", "z"],
+    layerDimensionNames: ["x", "y", "z"],
+  };
+}
+
+function diagonalMat4(
+  diag: readonly [number, number, number],
+  offDiag?: { row: number; col: number; value: number },
+): Float32Array {
+  const m = new Float32Array(16);
+  m[0] = diag[0];
+  m[5] = diag[1];
+  m[10] = diag[2];
+  m[15] = 1;
+  if (offDiag !== undefined) {
+    m[offDiag.row + 4 * offDiag.col] = offDiag.value;
+  }
+  return m;
+}
+
+describe("computeDiagonalModelToGlobalMetersScale", () => {
+  it("composes a diagonal model->renderLayer scale with per-axis global scales", () => {
+    const transform = makeIdentityMappedTransform(diagonalMat4([2, 3, 4]));
+    const result = computeDiagonalModelToGlobalMetersScale(
+      transform as any,
+      new Float64Array([10, 20, 30]),
+    );
+    expect(result).toBeDefined();
+    expect(Array.from(result!)).toEqual([20, 60, 120]);
+  });
+
+  it("reflects a live 1000x output rescale (the mm-to-µm bug scenario)", () => {
+    // The render-layer transform scales model coordinates by 1e-3
+    // relative to the store's own declared unit -- e.g. the user
+    // corrected the source's output dimensions from mm to µm.
+    const transform = makeIdentityMappedTransform(
+      diagonalMat4([1e-3, 1e-3, 1e-3]),
+    );
+    const result = computeDiagonalModelToGlobalMetersScale(
+      transform as any,
+      new Float64Array([1, 1, 1]),
+    );
+    expect(result).toBeDefined();
+    for (const v of result!) {
+      expect(v).toBeCloseTo(1e-3, 9);
     }
   });
 
-  it("withholds it for multi-component swizzles too", () => {
-    // `.xy` / `.rgb` are just as much a member access as `.z`.
-    expect(isUnsafeBareAttributeAlias("xy")).toBe(true);
-    expect(isUnsafeBareAttributeAlias("rgb")).toBe(true);
-    expect(isUnsafeBareAttributeAlias("xyzw")).toBe(true);
+  it("returns undefined when a model dimension is unmapped", () => {
+    const transform = makeIdentityMappedTransform(diagonalMat4([2, 3, 4]));
+    (transform as any).localToRenderLayerDimensions = [0, -1, 2];
+    const result = computeDiagonalModelToGlobalMetersScale(
+      transform as any,
+      new Float64Array([1, 1, 1]),
+    );
+    expect(result).toBeUndefined();
   });
 
-  it("keeps it for names that cannot be a swizzle", () => {
-    // Ordinary attribute names stay usable bare, as they always were --
-    // withholding more than necessary would break existing hand-written
-    // shaders for no gain.
-    for (const name of ["arc_length", "fa", "tangent", "curvature", "xyzwr"]) {
-      expect(isUnsafeBareAttributeAlias(name)).toBe(false);
+  it("returns undefined for a non-diagonal (rotated/sheared) transform", () => {
+    const transform = makeIdentityMappedTransform(
+      diagonalMat4([2, 3, 4], { row: 0, col: 1, value: 5 }),
+    );
+    const result = computeDiagonalModelToGlobalMetersScale(
+      transform as any,
+      new Float64Array([1, 1, 1]),
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it("returns undefined when the corresponding global scale is invalid", () => {
+    const transform = makeIdentityMappedTransform(diagonalMat4([2, 3, 4]));
+    const result = computeDiagonalModelToGlobalMetersScale(
+      transform as any,
+      new Float64Array([10, 0, 30]),
+    );
+    expect(result).toBeUndefined();
+  });
+});
+
+describe("maybeUpdateAutoSpatialSkeletonGridResolutionTarget bias stability", () => {
+  function makeWatchable(initial: number) {
+    let v = initial;
+    return {
+      get value() {
+        return v;
+      },
+      set value(x: number) {
+        v = x;
+      },
+      changed: { dispatch: () => {} },
+    };
+  }
+
+  it("does not corrupt the persisted bias across repeated sub-threshold updates", () => {
+    const target = makeWatchable(0);
+    const bias = makeWatchable(1);
+    const displayState = {
+      autoSpatialSkeletonGridLevel3d: { value: true },
+      spatialSkeletonGridResolutionTarget3d: target,
+      spatialSkeletonGridResolutionBias3d: bias,
+    } as any;
+
+    // Identity view-projection: w=1 regardless of world position; only
+    // the varying `width` below perturbs the computed target by a tiny
+    // (sub-0.1%) amount frame to frame, matching the real skip-write path.
+    const viewProjectionMat = mat4.create();
+    const localPosition = new Float32Array(0);
+
+    maybeUpdateAutoSpatialSkeletonGridResolutionTarget(
+      displayState,
+      { viewProjectionMat, width: 1000, height: 1, globalPosition: new Float32Array(3) },
+      localPosition,
+      "3d",
+    );
+    // First call always writes (no prior `lastAuto`).
+    expect(target.value).toBeCloseTo(0.2, 10);
+    expect(bias.value).toBe(1);
+
+    // Two more frames with a change small enough to land in the
+    // "skip write" branch (< 0.1%), matching ordinary smooth camera
+    // motion.  Before the fix, `lastAuto` advanced on the skipped
+    // write anyway, drifted away from the un-changed `target.value`,
+    // and on the very next frame got misread as a manual widget drag —
+    // corrupting `bias`.
+    for (let i = 0; i < 5; ++i) {
+      maybeUpdateAutoSpatialSkeletonGridResolutionTarget(
+        displayState,
+        {
+          viewProjectionMat,
+          width: 1000.1,
+          height: 1,
+          globalPosition: new Float32Array(3),
+        },
+        localPosition,
+        "3d",
+      );
     }
-  });
 
-  it("does not mix components from different swizzle sets", () => {
-    // `.xr` is not a legal swizzle, so `#define xr` cannot corrupt a member
-    // access.
-    expect(isUnsafeBareAttributeAlias("xr")).toBe(false);
-    expect(isUnsafeBareAttributeAlias("")).toBe(false);
+    expect(bias.value).toBe(1);
+    expect(target.value).toBeCloseTo(0.2, 10);
   });
 });

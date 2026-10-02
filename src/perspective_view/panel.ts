@@ -24,7 +24,6 @@ import { applyRenderViewportToProjectionMatrix } from "#src/display_context.js";
 import type { VisibleRenderLayerTracker } from "#src/layer/index.js";
 import { makeRenderedPanelVisibleLayerTracker } from "#src/layer/index.js";
 import { PERSPECTIVE_VIEW_RPC_ID } from "#src/perspective_view/base.js";
-import { CrossSectionOutlineRenderHelper } from "#src/perspective_view/cross_section_outline.js";
 import type {
   PerspectiveViewReadyRenderContext,
   PerspectiveViewRenderContext,
@@ -97,7 +96,6 @@ export interface PerspectiveViewerState extends RenderedDataViewerState {
   crossSectionBackgroundColor: TrackableRGB;
   perspectiveViewBackgroundColor: TrackableRGB;
   hideCrossSectionBackground3D: TrackableBoolean;
-  showCrossSectionOutline3D: TrackableBoolean;
   rpc: RPC;
 }
 
@@ -185,12 +183,6 @@ void emit(vec4 color, float depth, float intensity, highp uint pickId) {
 const tempVec3 = vec3.create();
 const tempVec4 = vec4.create();
 const tempMat4 = mat4.create();
-
-// White reads against both the default dark perspective background and the
-// section's own data. Held as a constant rather than a trackable: the setting
-// asked for is a boolean, and `uColor` is already a uniform, so a colour
-// trackable is a small follow-up on the same plumbing if wanted.
-const crossSectionOutlineColor = vec4.fromValues(1, 1, 1, 1);
 
 // Copy the OIT values to the main color buffer
 function defineTransparencyCopyShader(builder: ShaderBuilder) {
@@ -331,9 +323,6 @@ export class PerspectivePanel extends RenderedDataPanel {
   );
 
   private axesLineHelper = this.registerDisposer(AxesLineHelper.get(this.gl));
-  private crossSectionOutlineRenderHelper = this.registerDisposer(
-    CrossSectionOutlineRenderHelper.get(this.gl, perspectivePanelEmit),
-  );
   protected offscreenFramebuffer = this.registerDisposer(
     new FramebufferConfiguration(this.gl, {
       colorBuffers: [
@@ -602,9 +591,6 @@ export class PerspectivePanel extends RenderedDataPanel {
       viewer.hideCrossSectionBackground3D.changed.add(() =>
         this.scheduleRedraw(),
       ),
-    );
-    this.registerDisposer(
-      viewer.showCrossSectionOutline3D.changed.add(() => this.scheduleRedraw()),
     );
     this.sliceViews.changed.add(() => this.scheduleRedraw());
   }
@@ -1453,7 +1439,7 @@ export class PerspectivePanel extends RenderedDataPanel {
   }
 
   protected drawSliceViews(renderContext: PerspectiveViewRenderContext) {
-    const { sliceViewRenderHelper, crossSectionOutlineRenderHelper } = this;
+    const { sliceViewRenderHelper } = this;
     const {
       lightDirection,
       ambientLighting,
@@ -1462,7 +1448,6 @@ export class PerspectivePanel extends RenderedDataPanel {
     } = renderContext;
 
     const showSliceViews = this.viewer.showSliceViews.value;
-    const showCrossSectionOutline = this.viewer.showCrossSectionOutline3D.value;
     for (const [sliceView, unconditional] of this.sliceViews) {
       if (!unconditional && !showSliceViews) {
         continue;
@@ -1504,17 +1489,6 @@ export class PerspectivePanel extends RenderedDataPanel {
         1,
         1,
       );
-      // Drawn here, inside the loop, because `mat` is the shared `tempMat4` and
-      // holds this slice view's quad->clip transform only until the next
-      // iteration rebuilds it. Inherits both of the loop's guards: the
-      // showSliceViews/unconditional gate and the zero-size/invalid gate.
-      if (showCrossSectionOutline) {
-        crossSectionOutlineRenderHelper.draw(
-          mat,
-          crossSectionOutlineColor,
-          renderContext.projectionParameters,
-        );
-      }
     }
   }
 

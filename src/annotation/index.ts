@@ -752,43 +752,6 @@ export interface Ellipsoid extends AnnotationBase {
   type: AnnotationType.ELLIPSOID;
 }
 
-/**
- * Radii of the ellipsoid centred at `center` whose surface passes through
- * `corner`, the point under the cursor during a placement drag.
- *
- * An axis the drag does not constrain gets the largest radius that *is*
- * constrained, rather than zero. This matters because both endpoints of a
- * placement drag lie in the view plane, so in a slice view every axis normal
- * to that plane collapses to zero and the ellipsoid becomes invisibly thin --
- * the `max(subspaceRadii[i], 1e-3)` clamp in `src/annotation/ellipsoid.ts`
- * exists only to paper over that. Filling the unconstrained axes in turns the
- * gesture into "drag out a circle, get a sphere", which is also what a
- * spherical ROI needs from a single slice-view gesture.
- * (`PlaceBoundingBoxTool` guards the same collapse less gracefully, by nudging
- * the flattened axis by 1.)
- *
- * While every axis is still zero the annotation is merely pre-drag rather than
- * degenerate, so it is left alone.
- */
-export function computeEllipsoidRadii(
-  center: Float32Array,
-  corner: Float32Array,
-): Float32Array {
-  const rank = center.length;
-  const radii = new Float32Array(rank);
-  let maxRadius = 0;
-  for (let i = 0; i < rank; ++i) {
-    radii[i] = Math.abs(center[i] - corner[i]);
-    maxRadius = Math.max(maxRadius, radii[i]);
-  }
-  if (maxRadius > 0) {
-    for (let i = 0; i < rank; ++i) {
-      if (radii[i] === 0) radii[i] = maxRadius;
-    }
-  }
-  return radii;
-}
-
 export interface PolyLine extends AnnotationBase {
   points: Float32Array[];
   type: AnnotationType.POLYLINE;

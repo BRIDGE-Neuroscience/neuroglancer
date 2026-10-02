@@ -1265,24 +1265,6 @@ export class ChunkManager extends SharedObjectCounterpart {
     }
   }
 
-  /**
-   * Trailing-throttled {@link scheduleUpdateChunkPriorities} for callers that
-   * fire on a high-frequency event (e.g. per-chunk arrival) and only need the
-   * recompute to converge, not to run once per event. `scheduleUpdateChunkPriorities`
-   * itself coalesces only within a single event-loop task, so a stream of
-   * arrivals landing in separate macrotasks would otherwise re-arm a full
-   * priority pass each. This caps that at the same 200 ms cadence as the
-   * `gpuMemoryChanged` feedback (trailing, so the final arrival always lands a
-   * recompute within the window). Cancelled on disposal via `registerCancellable`.
-   */
-  scheduleUpdateChunkPrioritiesThrottled = this.registerCancellable(
-    throttle(
-      () => this.scheduleUpdateChunkPriorities(),
-      LAYER_CHUNK_STATISTICS_INTERVAL,
-      { leading: false, trailing: true },
-    ),
-  );
-
   registerLayer(layer: ChunkRenderLayerBackend) {
     const generation = this.recomputeChunkPriorities.count;
     if (layer.chunkManagerGeneration !== generation) {

@@ -19,12 +19,9 @@ import type { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
 import { SKELETON_RENDERING_SHADER_CONTROL_TOOL_ID } from "#src/layer/segmentation/json_keys.js";
 import { LAYER_CONTROLS } from "#src/layer/segmentation/layer_controls.js";
 import { Overlay } from "#src/overlay.js";
-
-import { appendBackgroundControls } from "#src/ui/background_color_by_controls.js";
 import { DependentViewWidget } from "#src/widget/dependent_view_widget.js";
 import { addLayerControlToOptionsTab } from "#src/widget/layer_control.js";
 import { LinkedLayerGroupWidget } from "#src/widget/linked_layer.js";
-
 import {
   makeShaderCodeWidgetTopRow,
   ShaderCodeWidget,
@@ -79,11 +76,6 @@ export class DisplayOptionsTab extends Tab {
         (hasSkeletonsLayer, parent, refCounted) => {
           if (!hasSkeletonsLayer) return;
           const skeletonLayer = layer.getSkeletonLayer()!;
-          // Tract layers: background "Colour by" + length filter above the raw
-          // shader editor.
-          if (layer.hasSpatiallyIndexedSkeletonsLayer.value) {
-            appendBackgroundControls(layer, skeletonLayer, refCounted, parent);
-          }
           if (skeletonLayer.vertexAttributes.length > 1) {
             buildShaderPropertyList(
               skeletonLayer.vertexAttributes.slice(1).map((x) => {

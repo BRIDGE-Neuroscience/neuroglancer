@@ -134,8 +134,7 @@ export class SegmentationRenderLayer extends SliceViewVolumeRenderLayer<ShaderPa
               return releventMap.size !== 0;
             },
             [
-              displayState.effectiveSegmentStatedColors ??
-                displayState.segmentStatedColors,
+              displayState.segmentStatedColors,
               displayState.tempSegmentStatedColors2d,
               displayState.useTempSegmentStatedColors2d,
             ],
@@ -422,10 +421,7 @@ uint64_t getMappedObjectId(uint64_t value) {
       const segmentStatedColors = displayState.useTempSegmentStatedColors2d
         .value
         ? displayState.tempSegmentStatedColors2d.value
-        : (
-            displayState.effectiveSegmentStatedColors ??
-            displayState.segmentStatedColors
-          ).value;
+        : displayState.segmentStatedColors.value;
       let { gpuSegmentStatedColorHashTable } = this;
       if (
         gpuSegmentStatedColorHashTable === undefined ||

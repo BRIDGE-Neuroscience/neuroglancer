@@ -42,11 +42,11 @@ import type { MeshSource, MultiscaleMeshSource } from "#src/mesh/frontend.js";
 import type { SegmentPropertyMap } from "#src/segmentation_display_state/property_map.js";
 import type { SegmentationGraphSource } from "#src/segmentation_graph/source.js";
 import type { SingleMeshSource } from "#src/single_mesh/frontend.js";
-import type { SkeletonSource } from "#src/skeleton/frontend.js";
 import type {
+  SkeletonSource,
   SpatiallyIndexedSkeletonSource,
   MultiscaleSpatiallyIndexedSkeletonSource,
-} from "#src/skeleton/spatial_frontend.js";
+} from "#src/skeleton/frontend.js";
 import type { MultiscaleVolumeChunkSource } from "#src/sliceview/volume/frontend.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type {
@@ -135,21 +135,6 @@ export interface DataSubsource {
     | SkeletonSource
     | SpatiallyIndexedSkeletonSource
     | MultiscaleSpatiallyIndexedSkeletonSource;
-  /**
-   * Vector geometry from a zarr-vectors store: points, lines, polylines,
-   * streamlines, graphs, skeletons, meshes.
-   *
-   * Separate from `mesh` because the two are not the same thing, even where they
-   * share render layers today: a zarr-vectors store declares its own geometry
-   * kind, carries per-vertex attributes the skeleton shader samples, and (unlike
-   * a `MeshSource`) is spatially indexed rather than keyed by segment. Keeping
-   * them apart is what lets a zarr-vectors *mesh* coexist with neuroglancer's
-   * own mesh sources without either having to guess which it is holding.
-   */
-  zarrVectors?:
-    | SkeletonSource
-    | SpatiallyIndexedSkeletonSource
-    | MultiscaleSpatiallyIndexedSkeletonSource;
   annotation?: MultiscaleAnnotationSource;
   staticAnnotations?: AnnotationSource;
   local?: LocalDataSource;
@@ -175,17 +160,6 @@ export interface DataSubsourceEntry {
    * for the first/primary subsource.
    */
   id: string;
-
-  /**
-   * Ids this subsource used to be published under.
-   *
-   * Subsource enable/disable is recorded in a saved link BY ID, so renaming one
-   * silently drops the setting out of every existing link -- a link that
-   * deliberately turned a subsource off would come back with it on. Listing the
-   * old names here lets a datasource rename without that cost: the loader falls
-   * back to them when the current id is absent from the saved spec.
-   */
-  legacyIds?: string[];
 
   subsource: DataSubsource;
 

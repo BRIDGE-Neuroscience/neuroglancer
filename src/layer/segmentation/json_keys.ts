@@ -30,17 +30,6 @@ export const SEGMENT_QUERY_JSON_KEY = "segmentQuery";
 export const SPATIAL_SKELETON_NODE_QUERY_JSON_KEY = "spatialSkeletonNodeQuery";
 export const SPATIAL_SKELETON_NODE_FILTER_JSON_KEY =
   "spatialSkeletonNodeFilter";
-export const ROI_FILTER_JSON_KEY = "roiFilter";
-// Name of the linked parcellation layer whose labels dissect the tracts (the
-// Filter tab's "By segmentation label" panel). Value is the layer name.
-export const ROI_LABEL_LAYER_JSON_KEY = "roiLabelLayer";
-// Tool identifier for the global "non-passing opacity" Render-tab control; the
-// value itself persists inside ROI_FILTER_JSON_KEY (RoiFilterState.ghostAlpha).
-export const ROI_NONPASSING_ALPHA_JSON_KEY = "roiNonPassingOpacity";
-export const IGNORE_SKELETON_MEMORY_CEILING_JSON_KEY =
-  "ignoreSkeletonMemoryCeiling";
-export const SPATIAL_SKELETON_DETAIL_FOCUS_JSON_KEY =
-  "spatialSkeletonDetailFocus";
 export const MESH_SILHOUETTE_RENDERING_JSON_KEY = "meshSilhouetteRendering";
 export const LINKED_SEGMENTATION_GROUP_JSON_KEY = "linkedSegmentationGroup";
 export const LINKED_SEGMENTATION_COLOR_GROUP_JSON_KEY =

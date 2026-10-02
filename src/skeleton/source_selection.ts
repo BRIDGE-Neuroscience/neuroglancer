@@ -20,7 +20,6 @@ interface SpatiallyIndexedSkeletonParameterHolder {
   parameters?: {
     gridIndex?: unknown;
     view?: unknown;
-    partitionsObjects?: unknown;
   };
 }
 
@@ -55,28 +54,6 @@ export function getSpatiallyIndexedSkeletonGridIndex<T extends object>(
   const gridIndex =
     getSpatiallyIndexedSkeletonParameterHolder(value)?.parameters?.gridIndex;
   return typeof gridIndex === "number" ? gridIndex : undefined;
-}
-
-/**
- * Whether this source's pyramid levels PARTITION the objects between them --
- * each object present at exactly one of the levels being drawn.
- *
- * The question the caller is really asking is "may I draw several levels at
- * once?". On an object-sparsity pyramid the answer is yes: the union is the
- * admitted set, each object drawn once, at one level. On a plain resolution
- * pyramid -- every level a decimated copy of every object -- it is no: the
- * union superimposes those copies, which reads as additive rendering that no
- * opacity control affects.
- *
- * Defaults to `false`, so a source that says nothing gets the safe answer.
- */
-export function getSpatiallyIndexedSkeletonPartitionsObjects<T extends object>(
-  value: T,
-): boolean {
-  return (
-    getSpatiallyIndexedSkeletonParameterHolder(value)?.parameters
-      ?.partitionsObjects === true
-  );
 }
 
 export function getSpatiallyIndexedSkeletonSourceView<T extends object>(
