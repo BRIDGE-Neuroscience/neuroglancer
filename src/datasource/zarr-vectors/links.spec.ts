@@ -15,256 +15,164 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { LevelCells } from "#src/datasource/zarr-vectors/level_cells.js";
 import {
-  createCrossChunkLinksCaches,
+  CrossChunkLinks,
   decodeLinkCell,
-  decodeRaggedBlobRows,
-  readCrossChunkLinksForChunk,
+  decodeRaggedRows,
+  lehmerDecode,
 } from "#src/datasource/zarr-vectors/links.js";
-import type { CellReader } from "#src/datasource/zarr-vectors/shard_cell_reader.js";
+import {
+  fixtureListDirectories,
+  fixtureRead,
+} from "#src/datasource/zarr-vectors/test_fixtures.js";
+import { ShardIndexCache } from "#src/datasource/zarr-vectors/zarr_array.js";
 
-// --- fixture builders reproducing the writer's on-disk framing ---------------
-
-/** `encode_ragged_blob`: [int64 k][int64 groupByteOffset × k][int64 data...]. */
-function raggedBlob(groups: number[][][]): Uint8Array {
-  const flat: number[] = [];
-  const byteOffsets: number[] = [];
-  for (const group of groups) {
-    byteOffsets.push(flat.length * 8);
-    for (const row of group) for (const v of row) flat.push(v);
-  }
-  const k = groups.length;
-  const buf = new Uint8Array(8 * (1 + k) + flat.length * 8);
-  const dv = new DataView(buf.buffer);
-  dv.setBigInt64(0, BigInt(k), true);
-  for (let i = 0; i < k; ++i)
-    dv.setBigInt64(8 + 8 * i, BigInt(byteOffsets[i]), true);
-  const base = 8 * (1 + k);
-  for (let i = 0; i < flat.length; ++i)
-    dv.setBigInt64(base + 8 * i, BigInt(flat[i]), true);
-  return buf;
-}
-
-/** numcodecs vlen-bytes container holding exactly one item. */
-function vlenBytesSingle(item: Uint8Array): Uint8Array {
-  const buf = new Uint8Array(8 + item.byteLength);
-  const dv = new DataView(buf.buffer);
-  dv.setUint32(0, 1, true);
-  dv.setUint32(4, item.byteLength, true);
-  buf.set(item, 8);
-  return buf;
-}
-
-/** A cell as stored: vlen-bytes(ragged_blob(rows as one group)). */
-function cell(rows: number[][]): Uint8Array {
-  return vlenBytesSingle(raggedBlob([rows]));
-}
-
-const enc = (obj: unknown) => new TextEncoder().encode(JSON.stringify(obj));
-
-describe("decodeRaggedBlobRows", () => {
-  it("decodes a single group of width-2 rows", () => {
-    // The real HCP1065 cell 0/links/0/0.0.+1/c/0/0/0: one edge [29, 63].
-    const rows = decodeRaggedBlobRows(raggedBlob([[[29, 63]]]), 2);
-    expect(rows).toEqual([[29, 63]]);
+/** A ragged blob: int64 group count, int64 group offsets, then the rows. */
+function raggedBlob(groups: number[][][], elementBytes: 4 | 8 = 8) {
+  const rows = groups.flat();
+  const ncols = rows[0]?.length ?? 0;
+  const header = 8 * (1 + groups.length);
+  const out = new Uint8Array(header + rows.length * ncols * elementBytes);
+  const view = new DataView(out.buffer);
+  view.setBigInt64(0, BigInt(groups.length), true);
+  let offset = 0;
+  groups.forEach((g, i) => {
+    view.setBigInt64(8 + 8 * i, BigInt(offset), true);
+    offset += g.length * ncols * elementBytes;
   });
+  rows.flat().forEach((v, i) => {
+    if (elementBytes === 8) view.setBigInt64(header + 8 * i, BigInt(v), true);
+    else view.setInt32(header + 4 * i, v, true);
+  });
+  return out;
+}
 
-  it("flattens multiple groups", () => {
-    const rows = decodeRaggedBlobRows(
+describe("decodeRaggedRows", () => {
+  it("flattens every group's rows", () => {
+    const rows = decodeRaggedRows(
       raggedBlob([
+        [[1, 2]],
         [
-          [1, 2],
           [3, 4],
+          [5, 6],
         ],
-        [[5, 6]],
       ]),
       2,
     );
-    expect(rows).toEqual([
-      [1, 2],
-      [3, 4],
-      [5, 6],
-    ]);
+    expect(Array.from(rows)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
-  it("returns [] for an empty blob (k = 0)", () => {
-    expect(decodeRaggedBlobRows(raggedBlob([]), 2)).toEqual([]);
-    expect(decodeRaggedBlobRows(new Uint8Array(0), 2)).toEqual([]);
+  it("reads 32-bit link families", () => {
+    const rows = decodeRaggedRows(raggedBlob([[[7, 9]]], 4), 2, 4, true);
+    expect(Array.from(rows)).toEqual([7, 9]);
   });
 
-  it("throws when a group is not a whole number of rows", () => {
-    // 3 int64 with ncols=2 -> not divisible.
-    expect(() => decodeRaggedBlobRows(raggedBlob([[[1, 2, 3]]]), 2)).toThrow();
+  it("returns nothing for an empty cell", () => {
+    expect(decodeRaggedRows(new Uint8Array(8), 2).length).toBe(0);
+  });
+
+  it("rejects a cell that is not whole rows", () => {
+    const blob = raggedBlob([[[1, 2]]]);
+    expect(() =>
+      decodeRaggedRows(blob.subarray(0, blob.length - 4), 2),
+    ).toThrow();
+  });
+});
+
+describe("lehmerDecode", () => {
+  it("inverts zarr-vectors-py's _lehmer_encode", () => {
+    // _lehmer_encode([0,1,2]) == 0, ([2,1,0]) == 5, ([1,0]) == 1.
+    expect(lehmerDecode(0, 3)).toEqual([0, 1, 2]);
+    expect(lehmerDecode(5, 3)).toEqual([2, 1, 0]);
+    expect(lehmerDecode(1, 2)).toEqual([1, 0]);
+    expect(lehmerDecode(3, 3)).toEqual([1, 2, 0]);
   });
 });
 
 describe("decodeLinkCell", () => {
-  it("places endpoint chunks at source + offset (the real +z edge)", () => {
-    const records = decodeLinkCell(
-      cell([[29, 63]]),
-      [0, 0, 0], // source chunk
-      [[0, 0, 1]], // offset from the path (0.0.+1)
-      /*linkWidth=*/ 2,
-      /*hasPerm=*/ false,
-    );
-    expect(records).toEqual([
-      {
-        endpoints: [
-          { chunkCoords: [0, 0, 0], vertexIndex: 29 }, // endpoint 0 = source
-          { chunkCoords: [0, 0, 1], vertexIndex: 63 }, // endpoint 1 = source + offset
-        ],
-      },
-    ]);
-  });
-
-  it("uses a negative offset correctly", () => {
-    const [record] = decodeLinkCell(
-      cell([[7, 8]]),
-      [2, 2, 2],
-      [[-1, 0, 0]],
-      2,
-      false,
-    );
-    expect(record.endpoints[1].chunkCoords).toEqual([1, 2, 2]);
-  });
-
-  it("skips the perm_idx column when has_perm is set", () => {
-    // Row is [perm_idx, vi_0, vi_1]; only the vi columns become endpoints.
-    const [record] = decodeLinkCell(
-      cell([[5, 11, 22]]),
-      [0, 0, 0],
-      [[0, 1, 0]],
-      2,
-      true,
-    );
-    expect(record.endpoints.map((e) => e.vertexIndex)).toEqual([11, 22]);
-    expect(record.endpoints[1].chunkCoords).toEqual([0, 1, 0]);
-  });
-
-  it("rejects a zstd-compressed cell with a clear error", () => {
-    const zstd = new Uint8Array([0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0]);
-    expect(() =>
-      decodeLinkCell(zstd, [0, 0, 0], [[0, 0, 1]], 2, false),
-    ).toThrow(/zstd/);
-  });
-});
-
-// --- reader against an in-memory store, GET-only (no lister) ------------------
-
-function makeStore(entries: Record<string, Uint8Array>) {
-  return async (subpath: string): Promise<Uint8Array | undefined> =>
-    entries[subpath];
-}
-
-/** Adapt a subpath store into the `cellRead` contract: `<array>/c/<i/j/k>`
- * (origin/shard resolution is a no-op for these zero-origin, unsharded fixtures). */
-function cellReadFrom(
-  read: (
-    subpath: string,
-    signal: AbortSignal,
-  ) => Promise<Uint8Array | undefined>,
-): CellReader {
-  return (arrayPath: string, chunkKey: string, signal: AbortSignal) =>
-    read(`${arrayPath}/c/${chunkKey.split(".").join("/")}`, signal);
-}
-
-const FAMILY = enc({
-  attributes: {
-    zv_array: "links_family",
-    link_width: 2,
-    sid_ndim: 3,
-    directed: true,
-    store: "canonical",
-    level_delta: 0,
-  },
-});
-
-const PLUS_Z_ARRAY = enc({
-  attributes: {
-    zv_array: "links",
+  const array = {
     offsets: [[0, 0, 1]],
-    has_perm: false,
-    link_width: 2,
-    nonempty_chunks: ["0.0.0"], // only chunk (0,0,0) has +z edges
-  },
-});
+    hasPerm: false,
+    elementBytes: 8 as const,
+    signed: true,
+  };
 
-describe("readCrossChunkLinksForChunk (GET-only fallback)", () => {
-  const store = makeStore({
-    "links/0/zarr.json": FAMILY,
-    "links/0/0.0.+1/zarr.json": PLUS_Z_ARRAY,
-    "links/0/0.0.+1/c/0/0/0": cell([[29, 63]]),
-  });
-  // no kvStoreList -> bounded probe
-  const options = { kvStoreRead: store, cellRead: cellReadFrom(store) };
-
-  it("finds a source-side edge and locates its neighbour endpoint", async () => {
-    const table = await readCrossChunkLinksForChunk(
-      options,
-      [0, 0, 0],
-      createCrossChunkLinksCaches(),
-      new AbortController().signal,
+  it("places the second endpoint at source + offset", () => {
+    const [record] = decodeLinkCell(
+      raggedBlob([[[4, 9]]]),
+      [1, 2, 3],
+      array,
+      2,
     );
-    expect(table).toBeDefined();
-    expect(table!.linkWidth).toBe(2);
-    expect(table!.records).toEqual([
-      {
-        endpoints: [
-          { chunkCoords: [0, 0, 0], vertexIndex: 29 },
-          { chunkCoords: [0, 0, 1], vertexIndex: 63 },
-        ],
-      },
+    expect(record.endpoints).toEqual([
+      { chunkCoords: [1, 2, 3], vertexIndex: 4 },
+      { chunkCoords: [1, 2, 4], vertexIndex: 9 },
     ]);
   });
 
-  it("returns the SAME bridge for the neighbour chunk via the mirror (target) cell", async () => {
-    // Chunk (0,0,1) is the successor. Its own cell is empty, but the record is
-    // filed under (0,0,1) - (0,0,1) = (0,0,0), so the target-side read finds it.
-    const table = await readCrossChunkLinksForChunk(
-      options,
-      [0, 0, 1],
-      createCrossChunkLinksCaches(),
-      new AbortController().signal,
+  it("restores the writer's endpoint order from perm_idx", () => {
+    const withPerm = { ...array, hasPerm: true };
+    const [record] = decodeLinkCell(
+      raggedBlob([[[1, 4, 9]]]),
+      [0, 0, 0],
+      withPerm,
+      2,
     );
-    expect(table!.records).toHaveLength(1);
-    expect(table!.records[0].endpoints[1].chunkCoords).toEqual([0, 0, 1]);
+    // Stored canonically as (source, neighbour); perm 1 means the writer had
+    // the neighbour first.
+    expect(record.endpoints.map((e) => e.vertexIndex)).toEqual([9, 4]);
+    expect(record.endpoints[0].chunkCoords).toEqual([0, 0, 1]);
+  });
+});
+
+describe("CrossChunkLinks on a zarr-vectors-py store", () => {
+  const make = () =>
+    new CrossChunkLinks({
+      cells: new LevelCells(
+        fixtureRead("poly_raw"),
+        new ShardIndexCache(),
+        "0",
+      ),
+      listDirectories: (path) =>
+        fixtureListDirectories("poly_raw")(`0/${path}`),
+    });
+
+  it("finds every cross-chunk link exactly once across owning chunks", async () => {
+    const links = make();
+    const discovery = await links.discover();
+    expect(discovery?.arrays.length).toBe(2);
+    const keys = ["0.1.0", "1.1.0", "0.1.1", "1.1.1", "0.1.2", "1.1.2"];
+    let total = 0;
+    for (const key of keys) {
+      const table = await links.linksOwnedBy(
+        key.split(".").map(Number),
+        new AbortController().signal,
+      );
+      for (const record of table!.records) {
+        const [a, b] = record.endpoints;
+        const delta = a.chunkCoords.map((c, d) =>
+          Math.abs(c - b.chunkCoords[d]),
+        );
+        expect(delta.reduce((x, y) => x + y, 0)).toBe(1);
+      }
+      total += table!.records.length;
+    }
+    // The family group records how many links the writer stored.
+    expect(total).toBe(5);
   });
 
-  it("skips the GET when nonempty_chunks excludes the cell", async () => {
-    // A chunk with no incident edges either way returns an empty table (not
-    // undefined): the family exists, this chunk just has no links.
-    const table = await readCrossChunkLinksForChunk(
-      options,
-      [5, 5, 5],
-      createCrossChunkLinksCaches(),
+  it("survives an aborted first request", async () => {
+    const links = make();
+    const controller = new AbortController();
+    controller.abort();
+    await links
+      .linksOwnedBy([0, 1, 0], controller.signal)
+      .catch(() => undefined);
+    const table = await links.linksOwnedBy(
+      [0, 1, 0],
       new AbortController().signal,
     );
     expect(table).toBeDefined();
-    expect(table!.records).toEqual([]);
-  });
-
-  it("returns undefined when the links family is absent", async () => {
-    const empty = makeStore({});
-    const table = await readCrossChunkLinksForChunk(
-      { kvStoreRead: empty, cellRead: cellReadFrom(empty) },
-      [0, 0, 0],
-      createCrossChunkLinksCaches(),
-      new AbortController().signal,
-    );
-    expect(table).toBeUndefined();
-  });
-
-  it("throws when the family group is present but malformed (unreadable, not absent)", async () => {
-    const bad = makeStore({
-      "links/0/zarr.json": enc({ attributes: { zv_array: "not_links" } }),
-    });
-    await expect(
-      readCrossChunkLinksForChunk(
-        { kvStoreRead: bad, cellRead: cellReadFrom(bad) },
-        [0, 0, 0],
-        createCrossChunkLinksCaches(),
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow();
   });
 });

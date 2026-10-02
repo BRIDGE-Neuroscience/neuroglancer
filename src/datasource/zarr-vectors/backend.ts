@@ -14,314 +14,394 @@
  * limitations under the License.
  */
 
-// Side-effect import: pulls in the skeleton / polyline / streamline
-// chunk-source backends so their `@registerSharedObject()` decorators
-// run when the worker loads this module.  Without this import the new
-// backends would never appear in the RPC registry and the frontend
-// would fail to instantiate matching chunk sources.
-import "#src/datasource/zarr-vectors/geometry_backend.js";
+/**
+ * @file Chunk-worker side of the zarr-vectors datasource: spatial chunks for
+ * the dense layer, whole objects for Neuroglancer's own skeleton and mesh
+ * layers, and the render-layer backend that decides which chunks to load.
+ */
 
-import type { AnnotationGeometryChunk } from "#src/annotation/backend.js";
 import {
-  AnnotationGeometryChunkSourceBackend,
-  AnnotationGeometryData,
-  AnnotationSource,
-} from "#src/annotation/backend.js";
+  WithParameters,
+  withChunkManager,
+} from "#src/chunk_manager/backend.js";
+import { ChunkState } from "#src/chunk_manager/base.js";
+import type { ZarrVectorsChunkSpecification } from "#src/datasource/zarr-vectors/base.js";
 import {
-  AnnotationPropertySerializer,
-  AnnotationType,
-  annotationTypeHandlers,
-  annotationTypes,
-} from "#src/annotation/index.js";
-import { decodeZstd } from "#src/async_computation/decode_zstd_request.js";
-import { requestAsyncComputation } from "#src/async_computation/request.js";
-import { WithParameters } from "#src/chunk_manager/backend.js";
-import {
-  ZarrVectorsAnnotationSourceParameters,
-  ZarrVectorsAnnotationSpatialIndexSourceParameters,
+  ZARR_VECTORS_DENSE_RENDER_LAYER_RPC_ID,
+  ZARR_VECTORS_DENSE_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
+  ZarrVectorsGeometryChunkSourceParameters,
+  ZarrVectorsMeshSourceParameters,
+  ZarrVectorsObjectSkeletonSourceParameters,
 } from "#src/datasource/zarr-vectors/base.js";
-import { decodeAttributeToFloat32 } from "#src/datasource/zarr-vectors/vertex_attribute_float.js";
-import { readVlenBytesElement } from "#src/datasource/zarr-vectors/vlen_bytes.js";
+import type { DenseChunkData } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
+import { LevelPipeline } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
+import { forEachDenseChunkToLoad } from "#src/datasource/zarr-vectors/dense_lod.js";
+import { ObjectReader } from "#src/datasource/zarr-vectors/object_reader.js";
+import type { ZarrArrayRead } from "#src/datasource/zarr-vectors/zarr_array.js";
+import { ShardIndexCache } from "#src/datasource/zarr-vectors/zarr_array.js";
+import type { SharedKvStoreContextCounterpart } from "#src/kvstore/backend.js";
 import { WithSharedKvStoreContextCounterpart } from "#src/kvstore/backend.js";
 import { joinBaseUrlAndPath } from "#src/kvstore/url.js";
-import { registerSharedObject } from "#src/worker_rpc.js";
+import type { FragmentChunk, ManifestChunk } from "#src/mesh/backend.js";
+import { assignMeshFragmentData, MeshSource } from "#src/mesh/backend.js";
+import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
+import { validateDisplayDimensionRenderInfoProperty } from "#src/navigation_state.js";
+import type {
+  RenderedViewBackend,
+  RenderLayerBackendAttachment,
+} from "#src/render_layer_backend.js";
+import { RenderLayerBackend } from "#src/render_layer_backend.js";
+import type { SharedWatchableValue } from "#src/shared_watchable_value.js";
+import type { SkeletonChunk } from "#src/skeleton/backend.js";
+import { SkeletonSource } from "#src/skeleton/backend.js";
+import {
+  deserializeTransformedSources,
+  SCALE_PRIORITY_MULTIPLIER,
+  SliceViewChunk,
+  SliceViewChunkSourceBackend,
+} from "#src/sliceview/backend.js";
+import type { TransformedSource } from "#src/sliceview/base.js";
+import {
+  getBasePriority,
+  getPriorityTier,
+} from "#src/visibility_priority/backend.js";
+import type { RPC } from "#src/worker_rpc.js";
+import { registerRPC, registerSharedObject } from "#src/worker_rpc.js";
 
-const IS_LITTLE_ENDIAN = true;
+const shardIndexCaches = new Map<string, ShardIndexCache>();
 
-// Zstd frame magic ("0xFD2FB528" little-endian).  Coarser pyramid
-// levels written by zarr-vectors are zstd-compressed even though
-// level 0 is raw; we sniff the magic byte to decide whether to
-// decompress.  Robust to whatever per-chunk codec config the writer
-// emits — we don't need to read each chunk's individual zarr.json.
-const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd] as const;
-
-function looksLikeZstd(bytes: Uint8Array): boolean {
-  if (bytes.byteLength < 4) return false;
-  return (
-    bytes[0] === ZSTD_MAGIC[0] &&
-    bytes[1] === ZSTD_MAGIC[1] &&
-    bytes[2] === ZSTD_MAGIC[2] &&
-    bytes[3] === ZSTD_MAGIC[3]
-  );
-}
-
-async function maybeDecompress(
-  bytes: Uint8Array<ArrayBuffer>,
-  signal: AbortSignal,
-): Promise<Uint8Array<ArrayBuffer>> {
-  if (!looksLikeZstd(bytes)) return bytes;
-  return await requestAsyncComputation(
-    decodeZstd,
-    signal,
-    [bytes.buffer],
-    bytes,
-  );
-}
-
-// Each per-chunk array in zarr-vectors (`vertices`, `vertex_fragments`,
-// `links/<delta>`, attribute arrays) is a *single* multidimensional
-// `vlen-bytes` zarr v3 array with one cell per spatial chunk — what
-// zarr-vectors-py's `_ensure_level_array` calls "the default single-array
-// layout". With `chunk_key_encoding: {name: "default", separator: "/"}` and an
-// all-ones chunk shape, the cell for a chunk key `i.j.k` is the entire chunk
-// at `<array>/c/i/j/k`, holding exactly one vlen element.
-function chunkCellPath(arrayPath: string, chunkKey: string): string {
-  return `${arrayPath}/c/${chunkKey.split(".").join("/")}`;
-}
-
-/**
- * Unwrap the single vlen element from a per-chunk array cell. Returns
- * `undefined` for an empty (`N=0`) chunk, which is how the writer marks a
- * populated grid cell that carries no blob.
- */
-function unwrapChunkCell(
-  chunkBytes: Uint8Array<ArrayBuffer>,
-): Uint8Array | undefined {
-  try {
-    return readVlenBytesElement(chunkBytes, 0);
-  } catch (e) {
-    if (e instanceof RangeError) return undefined;
-    throw e;
+function storeShardIndexes(storeUrl: string) {
+  let cache = shardIndexCaches.get(storeUrl);
+  if (cache === undefined) {
+    cache = new ShardIndexCache();
+    shardIndexCaches.set(storeUrl, cache);
   }
+  return cache;
 }
 
-function emptyGeometryData(): AnnotationGeometryData {
-  const data = new AnnotationGeometryData();
-  data.data = new Uint8Array(new ArrayBuffer(0));
-  data.typeToOffset = annotationTypes.map(() => 0);
-  data.typeToIds = annotationTypes.map(() => [] as string[]);
-  data.typeToIdMaps = annotationTypes.map(() => new Map<string, number>());
-  data.typeToInstanceCounts = annotationTypes.map(() => [] as number[]);
-  data.typeToSize = annotationTypes.map(() => 0);
-  return data;
-}
-
-function buildPointAnnotationGeometryData(
-  rank: number,
-  numPoints: number,
-  positions: Float32Array,
-  propertyValuesPerPoint: (
-    | Float32Array
-    | Uint8Array
-    | Uint16Array
-    | Uint32Array
-    | Int8Array
-    | Int16Array
-    | Int32Array
-  )[],
-  ids: string[],
-  serializer: AnnotationPropertySerializer,
-): AnnotationGeometryData {
-  const totalBytes = serializer.serializedBytes * numPoints;
-  const buffer = new ArrayBuffer(totalBytes);
-  const data = new Uint8Array(buffer);
-  const dv = new DataView(buffer);
-  const pointHandler = annotationTypeHandlers[AnnotationType.POINT];
-  const perAnnotationStride = serializer.propertyGroupBytes[0];
-
-  const numProps = propertyValuesPerPoint.length;
-  const propValues = new Array<number>(numProps);
-
-  for (let i = 0; i < numPoints; ++i) {
-    // Geometry — reuse a Float32Array view onto the source positions
-    // for this point.
-    const point = positions.subarray(i * rank, (i + 1) * rank);
-    pointHandler.serialize(
-      dv,
-      perAnnotationStride * i,
-      IS_LITTLE_ENDIAN,
-      rank,
-      {
-        type: AnnotationType.POINT,
-        point,
-        id: ids[i],
-        properties: [],
-      } as any,
+export function makeStoreRead(
+  context: SharedKvStoreContextCounterpart,
+  storeUrl: string,
+): ZarrArrayRead {
+  return async (path, options) => {
+    const response = await context.kvStoreContext.read(
+      joinBaseUrlAndPath(storeUrl, path),
+      { signal: options.signal, byteRange: options.byteRange },
     );
-    // Properties
-    for (let p = 0; p < numProps; ++p) {
-      propValues[p] = propertyValuesPerPoint[p][i] as number;
-    }
-    serializer.serialize(dv, 0, i, numPoints, IS_LITTLE_ENDIAN, propValues);
-  }
-
-  const result = new AnnotationGeometryData();
-  result.data = data;
-  result.typeToOffset = annotationTypes.map(() => 0);
-  result.typeToIds = annotationTypes.map(() => [] as string[]);
-  result.typeToIdMaps = annotationTypes.map(() => new Map<string, number>());
-  result.typeToInstanceCounts = annotationTypes.map(() => [] as number[]);
-  result.typeToSize = annotationTypes.map(() => 0);
-  result.typeToIds[AnnotationType.POINT] = ids;
-  result.typeToIdMaps[AnnotationType.POINT] = new Map(
-    ids.map((id, i) => [id, i]),
-  );
-  result.typeToInstanceCounts[AnnotationType.POINT] = Array.from(
-    { length: numPoints },
-    (_, i) => i,
-  );
-  result.typeToSize[AnnotationType.POINT] = numPoints;
-  return result;
+    if (response === undefined) return undefined;
+    return new Uint8Array(await response.response.arrayBuffer());
+  };
 }
 
-function chunkLinearIndex(
-  chunkGridPosition: ArrayLike<number>,
-  upperChunkBound: ArrayLike<number> | undefined,
-): number {
-  let idx = 0;
-  let stride = 1;
-  const rank = chunkGridPosition.length;
-  for (let i = 0; i < rank; ++i) {
-    idx += chunkGridPosition[i] * stride;
-    const dim = upperChunkBound?.[i] ?? 1;
-    stride *= Math.max(1, dim);
-  }
-  return idx;
-}
-
-@registerSharedObject()
-export class ZarrVectorsAnnotationSpatialIndexSourceBackend extends WithParameters(
-  WithSharedKvStoreContextCounterpart(AnnotationGeometryChunkSourceBackend),
-  ZarrVectorsAnnotationSpatialIndexSourceParameters,
+export function makeStoreList(
+  context: SharedKvStoreContextCounterpart,
+  storeUrl: string,
 ) {
-  declare parent: ZarrVectorsAnnotationSourceBackend;
+  return async (path: string) => {
+    const response = await context.kvStoreContext.list(
+      joinBaseUrlAndPath(storeUrl, `${path}/`),
+      { responseKeys: "suffix" },
+    );
+    return response.directories
+      .map((d) => d.replace(/\/$/, ""))
+      .filter((d) => d !== "");
+  };
+}
 
-  async download(chunk: AnnotationGeometryChunk, signal: AbortSignal) {
-    const { parent } = this;
-    const { baseUrl, rank, attributeNames, attributeDtypes } = this.parameters;
-    const { chunkGridPosition } = chunk;
-    const chunkKey = Array.from(chunkGridPosition, (v) => String(v)).join(".");
-    const vertexUrl = joinBaseUrlAndPath(
-      baseUrl,
-      chunkCellPath("vertices", chunkKey),
-    );
-    const vertexResponse = await this.sharedKvStoreContext.kvStoreContext.read(
-      vertexUrl,
-      { signal },
-    );
-    if (vertexResponse === undefined) {
-      chunk.data = emptyGeometryData();
-      return;
-    }
-    const vertexCell = await maybeDecompress(
-      new Uint8Array(await vertexResponse.response.arrayBuffer()),
-      signal,
-    );
-    const vertexBytes = unwrapChunkCell(vertexCell);
-    if (vertexBytes === undefined || vertexBytes.byteLength === 0) {
-      chunk.data = emptyGeometryData();
-      return;
-    }
-    const bytesPerPoint = rank * 4; // float32
-    if (vertexBytes.byteLength % bytesPerPoint !== 0) {
-      throw new Error(
-        `zarr-vectors vertex blob has ${vertexBytes.byteLength} bytes — not a multiple of ${bytesPerPoint} (rank=${rank} * float32)`,
+const warned = new Set<string>();
+function warnOnce(message: string) {
+  if (warned.has(message)) return;
+  warned.add(message);
+  console.warn(`zarr-vectors: ${message}`);
+}
+
+// ------------------------------------------------------------ dense chunks
+
+export class ZarrVectorsDenseChunk extends SliceViewChunk {
+  data: DenseChunkData | undefined;
+
+  serialize(msg: any, transfers: any[]) {
+    super.serialize(msg, transfers);
+    const { data } = this;
+    if (data !== undefined) {
+      msg.data = data;
+      transfers.push(
+        data.positions.buffer,
+        data.segmentIds.buffer,
+        data.edges.buffer,
+        ...data.attributes.map((a) => a.buffer),
       );
     }
-    const numPoints = vertexBytes.byteLength / bytesPerPoint;
-    const positions = decodeAttributeToFloat32(
-      vertexBytes,
-      "float32",
-      numPoints * rank,
-    );
+    this.data = undefined;
+  }
 
-    const propertyValuesPerPoint = await Promise.all(
-      attributeNames.map(async (name, i) => {
-        const url = joinBaseUrlAndPath(
-          baseUrl,
-          chunkCellPath(`vertex_attributes/${name}`, chunkKey),
-        );
-        const response = await this.sharedKvStoreContext.kvStoreContext.read(
-          url,
-          { signal },
-        );
-        if (response === undefined) {
-          throw new Error(
-            `zarr-vectors: chunk ${chunkKey} has vertices but property ${JSON.stringify(name)} is missing`,
-          );
-        }
-        const cell = await maybeDecompress(
-          new Uint8Array(await response.response.arrayBuffer()),
-          signal,
-        );
-        const bytes = unwrapChunkCell(cell);
-        if (bytes === undefined) {
-          throw new Error(
-            `zarr-vectors: chunk ${chunkKey} has vertices but property ${JSON.stringify(name)} is empty`,
-          );
-        }
-        return decodeAttributeToFloat32(bytes, attributeDtypes[i], numPoints);
-      }),
-    );
-
-    const baseId =
-      BigInt(
-        chunkLinearIndex(
-          chunkGridPosition,
-          (this.spec as any).upperChunkBound as ArrayLike<number> | undefined,
-        ),
-      ) << 32n;
-    const ids = new Array<string>(numPoints);
-    for (let i = 0; i < numPoints; ++i) {
-      ids[i] = (baseId | BigInt(i)).toString();
+  downloadSucceeded() {
+    const { data } = this;
+    let bytes = 0;
+    if (data !== undefined) {
+      bytes =
+        data.positions.byteLength +
+        data.segmentIds.byteLength +
+        data.edges.byteLength;
+      for (const a of data.attributes) bytes += a.byteLength;
     }
+    this.systemMemoryBytes = bytes;
+    this.gpuMemoryBytes = bytes;
+    super.downloadSucceeded();
+  }
 
-    chunk.data = buildPointAnnotationGeometryData(
-      rank,
-      numPoints,
-      positions,
-      propertyValuesPerPoint,
-      ids,
-      parent.annotationPropertySerializer,
-    );
+  freeSystemMemory() {
+    this.data = undefined;
   }
 }
 
 @registerSharedObject()
-export class ZarrVectorsAnnotationSourceBackend extends WithParameters(
-  WithSharedKvStoreContextCounterpart(AnnotationSource),
-  ZarrVectorsAnnotationSourceParameters,
+export class ZarrVectorsGeometryChunkSourceBackend extends WithParameters(
+  WithSharedKvStoreContextCounterpart(
+    SliceViewChunkSourceBackend<
+      ZarrVectorsChunkSpecification,
+      ZarrVectorsDenseChunk
+    >,
+  ),
+  ZarrVectorsGeometryChunkSourceParameters,
 ) {
-  annotationPropertySerializer = new AnnotationPropertySerializer(
-    this.parameters.rank,
-    annotationTypeHandlers[this.parameters.type].serializedBytes(
-      this.parameters.rank,
-    ),
-    this.parameters.properties,
-  );
+  private pipeline_: LevelPipeline | undefined;
 
-  // No relationships / by-id lookup in v1 — these methods are required
-  // by the AnnotationSource interface but never invoked for a
-  // point-only datasource without relationships.
-  async downloadSegmentFilteredGeometry(): Promise<void> {
-    throw new Error(
-      "zarr-vectors datasource: segment-filtered annotation queries are not supported",
-    );
+  private get pipeline() {
+    if (this.pipeline_ === undefined) {
+      const { storeUrl, description, level } = this.parameters;
+      this.pipeline_ = new LevelPipeline({
+        read: makeStoreRead(this.sharedKvStoreContext, storeUrl),
+        shardIndexes: storeShardIndexes(storeUrl),
+        listDirectories: makeStoreList(this.sharedKvStoreContext, storeUrl),
+        description,
+        level,
+        warn: warnOnce,
+      });
+    }
+    return this.pipeline_;
   }
 
-  async downloadMetadata(): Promise<void> {
-    throw new Error(
-      "zarr-vectors datasource: per-id annotation metadata lookup is not supported",
+  async download(chunk: ZarrVectorsDenseChunk, signal: AbortSignal) {
+    chunk.data = await this.pipeline.download(
+      Array.from(chunk.chunkGridPosition, Math.round),
+      signal,
     );
   }
 }
+ZarrVectorsGeometryChunkSourceBackend.prototype.chunkConstructor =
+  ZarrVectorsDenseChunk;
+
+// ------------------------------------------------------------ objects
+
+@registerSharedObject()
+export class ZarrVectorsObjectSkeletonSourceBackend extends WithParameters(
+  WithSharedKvStoreContextCounterpart(SkeletonSource),
+  ZarrVectorsObjectSkeletonSourceParameters,
+) {
+  private reader_: ObjectReader | undefined;
+  private get reader() {
+    if (this.reader_ === undefined) {
+      const { storeUrl, description, level } = this.parameters;
+      this.reader_ = new ObjectReader({
+        read: makeStoreRead(this.sharedKvStoreContext, storeUrl),
+        shardIndexes: storeShardIndexes(storeUrl),
+        listDirectories: makeStoreList(this.sharedKvStoreContext, storeUrl),
+        description,
+        level,
+        warn: warnOnce,
+      });
+    }
+    return this.reader_;
+  }
+
+  async download(chunk: SkeletonChunk, signal: AbortSignal) {
+    const skeleton = await this.reader.readSkeleton(chunk.objectId, signal);
+    chunk.vertexPositions = skeleton.positions;
+    chunk.indices = skeleton.edges;
+    chunk.vertexAttributes = skeleton.attributes;
+  }
+}
+
+@registerSharedObject()
+export class ZarrVectorsMeshSourceBackend extends WithParameters(
+  WithSharedKvStoreContextCounterpart(MeshSource),
+  ZarrVectorsMeshSourceParameters,
+) {
+  private reader_: ObjectReader | undefined;
+  private get reader() {
+    if (this.reader_ === undefined) {
+      const { storeUrl, description, level } = this.parameters;
+      this.reader_ = new ObjectReader({
+        read: makeStoreRead(this.sharedKvStoreContext, storeUrl),
+        shardIndexes: storeShardIndexes(storeUrl),
+        listDirectories: makeStoreList(this.sharedKvStoreContext, storeUrl),
+        description,
+        level,
+        warn: warnOnce,
+      });
+    }
+    return this.reader_;
+  }
+
+  async downloadFragmentIds(chunk: ManifestChunk, signal: AbortSignal) {
+    chunk.fragmentIds = await this.reader.meshFragmentKeys(
+      chunk.objectId,
+      signal,
+    );
+  }
+
+  async downloadFragment(chunk: FragmentChunk, signal: AbortSignal) {
+    const mesh = await this.reader.readMeshFragment(
+      chunk.manifestChunk!.objectId,
+      chunk.fragmentId!,
+      signal,
+    );
+    assignMeshFragmentData(chunk, {
+      vertexPositions: mesh.positions,
+      indices: mesh.indices,
+    });
+  }
+
+  download(chunk: ManifestChunk, signal: AbortSignal) {
+    return this.downloadFragmentIds(chunk, signal);
+  }
+}
+
+// ------------------------------------------------------------ render layer
+
+interface DenseAttachmentState {
+  displayDimensionRenderInfo: DisplayDimensionRenderInfo;
+  transformedSources: TransformedSource<
+    ZarrVectorsDenseRenderLayerBackend,
+    ZarrVectorsGeometryChunkSourceBackend
+  >[][];
+}
+
+@registerSharedObject(ZARR_VECTORS_DENSE_RENDER_LAYER_RPC_ID)
+export class ZarrVectorsDenseRenderLayerBackend extends withChunkManager(
+  RenderLayerBackend,
+) {
+  localPosition: SharedWatchableValue<Float32Array>;
+  renderScaleTarget2d: SharedWatchableValue<number>;
+  renderScaleTarget3d: SharedWatchableValue<number>;
+  densities: number[];
+
+  /** The 3-D target, for code that treats this as a volumetric render layer. */
+  get renderScaleTarget() {
+    return this.renderScaleTarget3d;
+  }
+
+  constructor(rpc: RPC, options: any) {
+    super(rpc, options);
+    this.localPosition = rpc.get(options.localPosition);
+    this.renderScaleTarget2d = rpc.get(options.renderScaleTarget2d);
+    this.renderScaleTarget3d = rpc.get(options.renderScaleTarget3d);
+    this.densities = options.densities;
+    const schedule = () => this.chunkManager.scheduleUpdateChunkPriorities();
+    for (const value of [
+      this.localPosition,
+      this.renderScaleTarget2d,
+      this.renderScaleTarget3d,
+    ]) {
+      this.registerDisposer(value.changed.add(schedule));
+    }
+    this.registerDisposer(
+      this.chunkManager.recomputeChunkPriorities.add(() =>
+        this.recomputeChunkPriorities(),
+      ),
+    );
+  }
+
+  attach(
+    attachment: RenderLayerBackendAttachment<
+      RenderedViewBackend,
+      DenseAttachmentState
+    >,
+  ) {
+    const schedule = () => this.chunkManager.scheduleUpdateChunkPriorities();
+    const { view } = attachment;
+    attachment.registerDisposer(schedule);
+    attachment.registerDisposer(
+      view.projectionParameters.changed.add(schedule),
+    );
+    attachment.registerDisposer(view.visibility.changed.add(schedule));
+    attachment.state = {
+      displayDimensionRenderInfo:
+        view.projectionParameters.value.displayDimensionRenderInfo,
+      transformedSources: [],
+    };
+  }
+
+  private recomputeChunkPriorities() {
+    this.chunkManager.registerLayer(this);
+    for (const attachment of this.attachments.values()) {
+      const { view } = attachment;
+      const visibility = view.visibility.value;
+      if (visibility === Number.NEGATIVE_INFINITY) continue;
+      const state = attachment.state as DenseAttachmentState;
+      const { transformedSources } = state;
+      const projectionParameters = view.projectionParameters.value;
+      if (
+        transformedSources.length === 0 ||
+        !validateDisplayDimensionRenderInfoProperty(
+          state,
+          projectionParameters.displayDimensionRenderInfo,
+        )
+      ) {
+        continue;
+      }
+      const priorityTier = getPriorityTier(visibility);
+      const basePriority = getBasePriority(visibility);
+      // A slice view has an orthographic, zero-depth frustum.
+      const is2d = projectionParameters.projectionMat[15] === 1;
+      const renderScaleTarget = (
+        is2d ? this.renderScaleTarget2d : this.renderScaleTarget3d
+      ).value;
+      forEachDenseChunkToLoad(
+        projectionParameters,
+        this.localPosition.value,
+        transformedSources[0],
+        this.densities,
+        renderScaleTarget,
+        (tsource, _levelIndex, isTarget) => {
+          const chunk = (
+            tsource.source as ZarrVectorsGeometryChunkSourceBackend
+          ).getChunk(tsource.curPositionInChunks);
+          if (isTarget) {
+            ++this.numVisibleChunksNeeded;
+            if (chunk.state === ChunkState.GPU_MEMORY) {
+              ++this.numVisibleChunksAvailable;
+            }
+          }
+          // The coarse stand-in loads first: it is small and fills the view.
+          this.chunkManager.requestChunk(
+            chunk,
+            priorityTier,
+            basePriority + (isTarget ? 0 : SCALE_PRIORITY_MULTIPLIER),
+          );
+        },
+      );
+    }
+  }
+}
+
+registerRPC(
+  ZARR_VECTORS_DENSE_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
+  function (x) {
+    const view = this.get(x.view) as RenderedViewBackend;
+    const layer = this.get(x.layer) as ZarrVectorsDenseRenderLayerBackend;
+    const attachment = layer.attachments.get(
+      view,
+    )! as RenderLayerBackendAttachment<
+      RenderedViewBackend,
+      DenseAttachmentState
+    >;
+    attachment.state!.transformedSources = deserializeTransformedSources<
+      ZarrVectorsGeometryChunkSourceBackend,
+      ZarrVectorsDenseRenderLayerBackend
+    >(this, x.sources, layer);
+    attachment.state!.displayDimensionRenderInfo = x.displayDimensionRenderInfo;
+    layer.chunkManager.scheduleUpdateChunkPriorities();
+  },
+);

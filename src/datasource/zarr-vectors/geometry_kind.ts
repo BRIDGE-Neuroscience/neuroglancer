@@ -15,23 +15,14 @@
  * the {@link KIND_CAPABILITIES} table.
  */
 
-import { COLOR_BY_DIRECTION_SHADER } from "#src/skeleton/default_shader.js";
-
 /**
- * Default skeleton-shader fragment-main text for **streamline** stores:
- * map the unit-sphere direction of the tangent at each vertex to an
- * RGB colour — the standard tractography "colour-by-direction"
- * convention.  Hosts of the `prop_tangent()` macro consume the
- * synthesised per-vertex tangent attribute the chunk decoder produces
- * for kinds where {@link hasSynthesisedTangent} is true.
- *
- * Aliases {@link COLOR_BY_DIRECTION_SHADER} (the datasource-neutral canonical
- * string) so the store-nominated default, the Rendering tab's "Direction"
- * preset, and the on-load `backgroundColorBy` sync are all byte-identical —
- * see that constant for why the identity matters.  `geometry_shader_bridge.ts`
- * re-exports for callers that imported it from there before the refactor.
+ * Colour by direction: |unit tangent| as RGB, the tractography convention.
+ * Swizzle-free on purpose, so a store attribute named `z` cannot break it.
  */
-export const DEFAULT_STREAMLINE_FRAGMENT_MAIN = COLOR_BY_DIRECTION_SHADER;
+export const DEFAULT_STREAMLINE_FRAGMENT_MAIN = `void main() {
+  emitRGB(abs(prop_tangent()));
+}
+`;
 
 /**
  * The geometry-type strings zarr-vectors emits in its

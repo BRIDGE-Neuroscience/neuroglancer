@@ -7,7 +7,6 @@
 
 import type { ZarrVectorsGeometryKind } from "#src/datasource/zarr-vectors/geometry_kind.js";
 import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js";
-import type { RoiFilterState } from "#src/datasource/zarr-vectors/roi_filter_state.js";
 
 /**
  * Pure, WebGL-free helpers for reading a zarr-vectors store's metadata: chunk
@@ -67,29 +66,6 @@ export function computeChunkIndexBounds(
     );
   }
   return { lowerChunkBound, upperChunkBound };
-}
-
-// ---------------------------------------------------------------- property_id
-
-/**
- * Neuroglancer annotation property identifiers must match
- * `/^[a-z][a-zA-Z0-9_]*$/`: they become `prop_<id>()` accessors in generated
- * GLSL, so anything else would not compile.  Store attribute names carry no
- * such restriction — MERFISH gene panels ship names like `gene_H2-Q2` — so map
- * each to the nearest legal identifier (and disambiguate collisions) rather
- * than failing the whole datasource.  Callers keep the original name as the
- * property description, and `attributeNames[i]` still holds the on-disk name.
- */
-export function toAnnotationPropertyId(
-  name: string,
-  used: Set<string>,
-): string {
-  let base = name.replace(/[^a-zA-Z0-9_]/g, "_");
-  if (!/^[a-z]/.test(base)) base = `p_${base}`;
-  let id = base;
-  for (let i = 2; used.has(id); ++i) id = `${base}_${i}`;
-  used.add(id);
-  return id;
 }
 
 // ---------------------------------------------------------------- attributes_fragment
@@ -247,81 +223,4 @@ export function resolveDeclaredGeometry(
     unsupported,
     ambiguous: consistent.length !== 1,
   };
-}
-
-// ---------------------------------------------------------------- store_provenance
-
-/**
- * @file Which shared-store document each live group came from, or was last
- * written to.
- *
- * One mapping serves both directions, because they are the same relationship:
- * a group loaded from the store and a group saved to it are both *backed by*
- * that document. Re-saving a loaded group therefore updates it in place rather
- * than making a copy, and the store picker can tell which stored groups are
- * already on screen.
- *
- * Keyed on the `RoiFilterState` rather than held on the Filter tab, because the
- * tab is rebuilt every time the layer side panel is closed and reopened — on
- * the tab, re-saving after reopening the panel silently created a second
- * document instead of updating the first. A WeakMap so a disposed layer's
- * entries go with it.
- *
- * Deliberately not persisted: group ids are session-scoped, so after a reload
- * nothing ties a restored group to the document it came from.
- */
-
-export interface SavedDocumentRef {
-  /** Document id in the shared store. */
-  id: string;
-  /** Preserved across re-saves, so updating does not reset the creation time. */
-  createdAt: string;
-}
-
-const savedDocuments = new WeakMap<
-  RoiFilterState,
-  Map<number, SavedDocumentRef>
->();
-
-export function rememberSavedDocument(
-  state: RoiFilterState,
-  groupId: number,
-  ref: SavedDocumentRef,
-): void {
-  let map = savedDocuments.get(state);
-  if (map === undefined) {
-    map = new Map();
-    savedDocuments.set(state, map);
-  }
-  map.set(groupId, ref);
-}
-
-export function savedDocumentFor(
-  state: RoiFilterState,
-  groupId: number,
-): SavedDocumentRef | undefined {
-  return savedDocuments.get(state)?.get(groupId);
-}
-
-/**
- * The live group backed by `documentId`, or undefined if it is not loaded.
- *
- * Checks the group still exists: a mapping outlives the group it referred to
- * when that group is deleted, and a stale id would make the picker claim a
- * document is on screen when it is not.
- */
-export function groupIdForDocument(
-  state: RoiFilterState,
-  documentId: string,
-): number | undefined {
-  const map = savedDocuments.get(state);
-  if (map === undefined) return undefined;
-  for (const [groupId, ref] of map) {
-    if (ref.id !== documentId) continue;
-    if (state.groups.some((g) => g.id === groupId)) return groupId;
-    // The group is gone; drop the mapping so it cannot mislead again.
-    map.delete(groupId);
-    return undefined;
-  }
-  return undefined;
 }

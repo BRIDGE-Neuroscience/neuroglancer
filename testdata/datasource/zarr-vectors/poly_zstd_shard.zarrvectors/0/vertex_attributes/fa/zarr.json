@@ -1,0 +1,82 @@
+{
+  "shape": [
+    2,
+    1,
+    3
+  ],
+  "data_type": "variable_length_bytes",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        2,
+        2,
+        2
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": "",
+  "codecs": [
+    {
+      "name": "sharding_indexed",
+      "configuration": {
+        "chunk_shape": [
+          1,
+          1,
+          1
+        ],
+        "codecs": [
+          {
+            "name": "vlen-bytes",
+            "configuration": {}
+          },
+          {
+            "name": "zstd",
+            "configuration": {
+              "level": 0,
+              "checksum": false
+            }
+          }
+        ],
+        "index_codecs": [
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "little"
+            }
+          },
+          {
+            "name": "crc32c"
+          }
+        ],
+        "index_location": "end"
+      }
+    }
+  ],
+  "attributes": {
+    "nonempty_chunks": [
+      "0.1.2",
+      "1.1.0",
+      "1.1.1",
+      "1.1.2"
+    ],
+    "chunk_grid_origin": [
+      0,
+      1,
+      0
+    ],
+    "zv_array": "attribute",
+    "name": "fa",
+    "dtype": "float32",
+    "row_shape": []
+  },
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

@@ -513,6 +513,10 @@ export function buildGeometryChunk(args: {
    */
   faces?: Uint32Array;
   faceArity?: number;
+  /** See `GeometryChunkDownloadOptions.linkedSkeletonLayout`. */
+  linkedSkeletonLayout?: boolean;
+  /** Children whose implied parent a cross-chunk record replaces. */
+  relinkedChildren?: ReadonlySet<number>;
 }): SkeletonChunk {
   const {
     rank,
@@ -576,11 +580,19 @@ export function buildGeometryChunk(args: {
       );
     }
   } else {
-    edges = synthesizeEdgesForConvention(
-      linksConvention,
-      fragmentIndex,
-      explicitEdges,
-    );
+    edges =
+      args.linkedSkeletonLayout &&
+      linksConvention === "implicit_sequential_with_branches"
+        ? linkedSkeletonEdges(
+            fragmentIndex,
+            explicitEdges ?? new Uint32Array(0),
+            args.relinkedChildren,
+          )
+        : synthesizeEdgesForConvention(
+            linksConvention,
+            fragmentIndex,
+            explicitEdges,
+          );
   }
 
   // Per-vertex tangent synthesis is driven by the capability table:
@@ -611,6 +623,31 @@ export function buildGeometryChunk(args: {
     nodeIds,
     fragmentIndex,
   };
+}
+
+/**
+ * Edges of a skeleton in zarr-vectors-tools' "linked" layout, where each
+ * fragment row's parent is the previous row UNLESS a stored `[child, parent]`
+ * record names a different one (a branch, or a parent in another chunk).
+ * Unioning the two, as the plain convention does, draws a chord from every
+ * branch child to the unrelated row before it.
+ */
+export function linkedSkeletonEdges(
+  fragmentIndex: FragmentIndex,
+  records: Uint32Array,
+  relinkedChildren: ReadonlySet<number> | undefined,
+): Uint32Array {
+  const replaced = new Set<number>(relinkedChildren ?? []);
+  for (let i = 0; i < records.length; i += 2) replaced.add(records[i]);
+  const implied = synthesizeSequentialEdges(fragmentIndex);
+  const out: number[] = [];
+  for (let i = 0; i < implied.length; i += 2) {
+    if (!replaced.has(implied[i + 1])) out.push(implied[i], implied[i + 1]);
+  }
+  for (let i = 0; i < records.length; i += 2) {
+    out.push(records[i + 1], records[i]);
+  }
+  return Uint32Array.from(out);
 }
 
 /**

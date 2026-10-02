@@ -39,7 +39,9 @@ export type VertexAttributeDtype =
   | "int32"
   | "float64"
   | "int64"
-  | "uint64";
+  | "uint64"
+  | "float16"
+  | "bool";
 
 /** Bytes per element on disk, per dtype. */
 export const ATTRIBUTE_ELEMENT_BYTES: Record<VertexAttributeDtype, number> = {
@@ -53,6 +55,8 @@ export const ATTRIBUTE_ELEMENT_BYTES: Record<VertexAttributeDtype, number> = {
   float64: 8,
   int64: 8,
   uint64: 8,
+  float16: 2,
+  bool: 1,
 };
 
 /**
@@ -140,6 +144,15 @@ export function decodeAttributeToFloat32(
     for (let i = 0; i < expectedElements; ++i) out[i] = wide[i];
     return out;
   }
+  if (dtype === "float16") {
+    const half = new Uint16Array(buffer, byteOffset, expectedElements);
+    for (let i = 0; i < expectedElements; ++i) out[i] = halfToFloat(half[i]);
+    return out;
+  }
+  if (dtype === "bool") {
+    out.set(new Uint8Array(buffer, byteOffset, expectedElements));
+    return out;
+  }
   if (dtype === "int64" || dtype === "uint64") {
     const wide =
       dtype === "int64"
@@ -163,6 +176,15 @@ export function decodeAttributeToFloat32(
  * values become picking ids. Returns `undefined` for dtypes that cannot carry
  * an exact id (see {@link isExactIntDtype}), which the caller reports.
  */
+function halfToFloat(h: number): number {
+  const sign = h & 0x8000 ? -1 : 1;
+  const exponent = (h >> 10) & 0x1f;
+  const fraction = h & 0x3ff;
+  if (exponent === 0) return sign * 2 ** -14 * (fraction / 1024);
+  if (exponent === 31) return fraction ? Number.NaN : sign * Infinity;
+  return sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
+}
+
 export function decodeAttributeExactInts(
   bytes: Uint8Array,
   dtype: VertexAttributeDtype,

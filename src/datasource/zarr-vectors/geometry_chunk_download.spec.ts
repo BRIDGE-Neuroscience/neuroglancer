@@ -12,12 +12,10 @@ import {
 } from "#src/datasource/zarr-vectors/fragment_index.js";
 import {
   downloadGeometryChunk,
-  fetchGhostVertices,
   packChunkKeyToIdWord,
-  type GhostVertexRequest,
   type LinkDtype,
 } from "#src/datasource/zarr-vectors/geometry_chunk_download.js";
-import type { CellReader } from "#src/datasource/zarr-vectors/shard_cell_reader.js";
+import type { CellReader } from "#src/datasource/zarr-vectors/level_cells.js";
 
 /** Build a single-range-fragment ZVFG blob covering all `numVertices` rows. */
 function singleRangeFragmentBlob(numVertices: number): Uint8Array {
@@ -77,19 +75,6 @@ function uint64SegmentIdBlob(ids: bigint[]): Uint8Array {
   return new Uint8Array(arr.buffer);
 }
 
-/**
- * Wrap a blob in the `vlen-bytes` chunk framing: `uint32 N=1`, `uint32 L`,
- * then the payload. Every per-chunk array cell holds exactly one element.
- */
-function vlenChunk(blob: Uint8Array): Uint8Array {
-  const out = new Uint8Array(8 + blob.byteLength);
-  const view = new DataView(out.buffer);
-  view.setUint32(0, 1, true);
-  view.setUint32(4, blob.byteLength, true);
-  out.set(blob, 8);
-  return out;
-}
-
 /** A trailing `"3.0.2"`-style segment marks a per-spatial-chunk array key. */
 const CHUNK_KEY_SUFFIX = /\/(\d+(?:\.\d+)*)$/;
 
@@ -122,11 +107,10 @@ function makeKvStore(map: Record<string, Uint8Array | undefined>): CellReader {
     }
     const arrayPath = key.slice(0, m.index);
     const cellPath = `${arrayPath}/c/${m[1].split(".").join("/")}`;
-    encoded.set(cellPath, blob === undefined ? undefined : vlenChunk(blob));
+    encoded.set(cellPath, blob);
   }
-  // `cellRead` contract: (arrayPath, chunkKey) -> raw vlen cell bytes. Mirrors
-  // the real reader, whose origin/shard resolution the download path no longer
-  // performs itself.
+  // `cellRead` contract: (arrayPath, chunkKey) -> the cell's payload. Mirrors
+  // the real reader, which resolves origin, sharding and codecs itself.
   return async (arrayPath: string, chunkKey: string) =>
     encoded.get(`${arrayPath}/c/${chunkKey.split(".").join("/")}`);
 }
@@ -755,223 +739,3 @@ describe("downloadGeometryChunk — link dtype matrix", () => {
 // ---------------------------------------------------------------------------
 // fetchGhostVertices
 // ---------------------------------------------------------------------------
-
-function uint16AttrBlob(values: number[]): Uint8Array {
-  const arr = new Uint16Array(values);
-  return new Uint8Array(arr.buffer);
-}
-
-describe("fetchGhostVertices", () => {
-  it("returns [] for an empty request list (and does not fetch anything)", async () => {
-    let fetchCount = 0;
-    const cellRead = async (_path: string) => {
-      fetchCount++;
-      return undefined;
-    };
-    const result = await fetchGhostVertices(
-      [],
-      {
-        rank: 3,
-        attributeNames: ["fa"],
-        attributeDtypes: ["float32"],
-        cellRead,
-      },
-      new AbortController().signal,
-    );
-    expect(result).toEqual([]);
-    expect(fetchCount).toBe(0);
-  });
-
-  it("slices one neighbor vertex + attribute into a ghost record", async () => {
-    // Neighbor chunk has 3 vertices.  Request vertex index 1.
-    const cellRead = makeKvStore({
-      "vertices/1.0.0": verticesBlob([10, 20, 30, 11, 21, 31, 12, 22, 32]),
-      "vertex_attributes/fa/1.0.0": new Uint8Array(
-        new Float32Array([0.1, 0.5, 0.9]).buffer,
-      ),
-    });
-    const requests: GhostVertexRequest[] = [
-      {
-        hostLocalVertex: 4,
-        neighborChunkKey: "1.0.0",
-        neighborLocalVertex: 1,
-      },
-    ];
-    const ghosts = await fetchGhostVertices(
-      requests,
-      {
-        rank: 3,
-        attributeNames: ["fa"],
-        attributeDtypes: ["float32"],
-        cellRead,
-      },
-      new AbortController().signal,
-    );
-    expect(ghosts).toHaveLength(1);
-    expect(Array.from(ghosts[0].position)).toEqual([11, 21, 31]);
-    expect(ghosts[0].attributes).toHaveLength(1);
-    expect((ghosts[0].attributes[0] as Float32Array)[0]).toBeCloseTo(0.5);
-    expect(ghosts[0].bridgeFromLocalVertex).toBe(4);
-  });
-
-  it("groups multiple requests on the same neighbor into one fetch per file", async () => {
-    // Cells of the single-vlen-array layout: chunk key "1.0.0" -> "c/1/0/0".
-    const positionsCell = "vertices/c/1/0/0";
-    const attributeCell = "vertex_attributes/fa/c/1/0/0";
-    const fetched: string[] = [];
-    const cellRead: CellReader = async (arrayPath, chunkKey, _s) => {
-      const path = `${arrayPath}/c/${chunkKey.split(".").join("/")}`;
-      fetched.push(path);
-      if (path === positionsCell) {
-        return vlenChunk(verticesBlob([10, 20, 30, 11, 21, 31, 12, 22, 32]));
-      }
-      if (path === attributeCell) {
-        return vlenChunk(
-          new Uint8Array(new Float32Array([0.1, 0.5, 0.9]).buffer),
-        );
-      }
-      return undefined;
-    };
-    const requests: GhostVertexRequest[] = [
-      { hostLocalVertex: 0, neighborChunkKey: "1.0.0", neighborLocalVertex: 0 },
-      { hostLocalVertex: 1, neighborChunkKey: "1.0.0", neighborLocalVertex: 1 },
-      { hostLocalVertex: 2, neighborChunkKey: "1.0.0", neighborLocalVertex: 2 },
-    ];
-    const ghosts = await fetchGhostVertices(
-      requests,
-      {
-        rank: 3,
-        attributeNames: ["fa"],
-        attributeDtypes: ["float32"],
-        cellRead,
-      },
-      new AbortController().signal,
-    );
-    expect(ghosts).toHaveLength(3);
-    // Exactly one fetch per file (positions + 1 attribute = 2 unique paths),
-    // even though three requests name the same neighbor chunk.
-    expect(fetched.filter((p) => p === positionsCell)).toHaveLength(1);
-    expect(fetched.filter((p) => p === attributeCell)).toHaveLength(1);
-    expect(Array.from(ghosts[0].position)).toEqual([10, 20, 30]);
-    expect(Array.from(ghosts[2].position)).toEqual([12, 22, 32]);
-  });
-
-  it("drops requests whose neighbor chunk file is absent (sparse / missing)", async () => {
-    const cellRead = makeKvStore({});
-    const requests: GhostVertexRequest[] = [
-      { hostLocalVertex: 0, neighborChunkKey: "1.0.0", neighborLocalVertex: 0 },
-    ];
-    const ghosts = await fetchGhostVertices(
-      requests,
-      {
-        rank: 3,
-        attributeNames: ["fa"],
-        attributeDtypes: ["float32"],
-        cellRead,
-      },
-      new AbortController().signal,
-    );
-    expect(ghosts).toEqual([]);
-  });
-
-  it("drops requests whose neighbor vertex index is out of range", async () => {
-    const cellRead = makeKvStore({
-      // Only 2 vertices' worth of bytes — index 5 is out of range.
-      "vertices/1.0.0": verticesBlob([0, 0, 0, 1, 1, 1]),
-    });
-    const requests: GhostVertexRequest[] = [
-      { hostLocalVertex: 0, neighborChunkKey: "1.0.0", neighborLocalVertex: 5 },
-    ];
-    const ghosts = await fetchGhostVertices(
-      requests,
-      {
-        rank: 3,
-        attributeNames: [],
-        attributeDtypes: [],
-        cellRead,
-      },
-      new AbortController().signal,
-    );
-    expect(ghosts).toEqual([]);
-  });
-
-  it("zero-fills missing neighbor attributes (pyramid-level case)", async () => {
-    const cellRead = makeKvStore({
-      "vertices/1.0.0": verticesBlob([5, 6, 7]),
-      // Intentionally NO vertex_attributes/fa/...
-    });
-    const requests: GhostVertexRequest[] = [
-      { hostLocalVertex: 0, neighborChunkKey: "1.0.0", neighborLocalVertex: 0 },
-    ];
-    const ghosts = await fetchGhostVertices(
-      requests,
-      {
-        rank: 3,
-        attributeNames: ["fa"],
-        attributeDtypes: ["float32"],
-        cellRead,
-      },
-      new AbortController().signal,
-    );
-    expect(ghosts).toHaveLength(1);
-    expect((ghosts[0].attributes[0] as Float32Array)[0]).toBe(0);
-  });
-
-  it("decodes a uint16-dtype attribute to float32 (mixed dtype slicing)", async () => {
-    const cellRead = makeKvStore({
-      "vertices/1.0.0": verticesBlob([0, 0, 0, 1, 1, 1]),
-      "vertex_attributes/swc_type/1.0.0": uint16AttrBlob([3, 7]),
-    });
-    const requests: GhostVertexRequest[] = [
-      { hostLocalVertex: 0, neighborChunkKey: "1.0.0", neighborLocalVertex: 1 },
-    ];
-    const ghosts = await fetchGhostVertices(
-      requests,
-      {
-        rank: 3,
-        attributeNames: ["swc_type"],
-        attributeDtypes: ["uint16"],
-        cellRead,
-      },
-      new AbortController().signal,
-    );
-    expect(ghosts).toHaveLength(1);
-    expect(ghosts[0].attributes[0]).toBeInstanceOf(Float32Array);
-    expect((ghosts[0].attributes[0] as Float32Array)[0]).toBe(7);
-  });
-
-  it("handles multiple neighbors (parallel fetches, results ordered by request)", async () => {
-    const cellRead = makeKvStore({
-      "vertices/0.0.0": verticesBlob([1, 2, 3]),
-      "vertices/1.0.0": verticesBlob([4, 5, 6]),
-    });
-    const requests: GhostVertexRequest[] = [
-      {
-        hostLocalVertex: 10,
-        neighborChunkKey: "1.0.0",
-        neighborLocalVertex: 0,
-      },
-      {
-        hostLocalVertex: 20,
-        neighborChunkKey: "0.0.0",
-        neighborLocalVertex: 0,
-      },
-    ];
-    const ghosts = await fetchGhostVertices(
-      requests,
-      {
-        rank: 3,
-        attributeNames: [],
-        attributeDtypes: [],
-        cellRead,
-      },
-      new AbortController().signal,
-    );
-    expect(ghosts).toHaveLength(2);
-    // Output order matches request order.
-    expect(Array.from(ghosts[0].position)).toEqual([4, 5, 6]);
-    expect(ghosts[0].bridgeFromLocalVertex).toBe(10);
-    expect(Array.from(ghosts[1].position)).toEqual([1, 2, 3]);
-    expect(ghosts[1].bridgeFromLocalVertex).toBe(20);
-  });
-});

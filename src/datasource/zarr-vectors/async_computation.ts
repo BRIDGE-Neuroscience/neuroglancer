@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Worker-side codec registrations.  Coarsened pyramid levels written
-// by zarr-vectors use zstd compression; the backend sniffs the
-// magic byte and dispatches through this worker.
+// Decoders for the compressors zarr-vectors stores use (zstd is the default
+// of zarr-vectors-py's high-level API; blosc is a zvtools option).
+import "#src/async_computation/decode_blosc.js";
 import "#src/async_computation/decode_zstd.js";

@@ -20,17 +20,16 @@ import { decodeFragments } from "#src/datasource/zarr-vectors/fragment_index.js"
 import {
   buildGeometryChunk,
   type AttributeTypedArray,
-  type GhostVertexRecord,
   type LinksConvention,
   type SkeletonChunk,
   type GeometryKind,
 } from "#src/datasource/zarr-vectors/geometry_chunk.js";
 import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js";
+import type { CellReader } from "#src/datasource/zarr-vectors/level_cells.js";
 import {
   intraOffsets,
   linksPath,
 } from "#src/datasource/zarr-vectors/links_paths.js";
-import type { CellReader } from "#src/datasource/zarr-vectors/shard_cell_reader.js";
 import type { VertexAttributeDtype } from "#src/datasource/zarr-vectors/vertex_attribute_float.js";
 import {
   ATTRIBUTE_ELEMENT_BYTES,
@@ -39,7 +38,6 @@ import {
   isExactIntDtype,
   zeroAttribute,
 } from "#src/datasource/zarr-vectors/vertex_attribute_float.js";
-import { readVlenBytesElement } from "#src/datasource/zarr-vectors/vlen_bytes.js";
 
 /** Supported on-disk integer dtype for `links/0/<chunk>`. */
 export type LinkDtype =
@@ -84,6 +82,20 @@ export interface GeometryChunkDownloadOptions {
   readonly attributeNames: readonly string[];
   /** Per-vertex attribute dtypes, parallel to `attributeNames`. */
   readonly attributeDtypes: readonly AttributeDtype[];
+  /** Values per vertex of each attribute, parallel to `attributeNames` (default 1). */
+  readonly attributeComponents?: readonly number[];
+  /** On-disk element type of `vertices` (default float32); decoded to float32. */
+  readonly vertexDtype?: AttributeDtype;
+  /**
+   * zarr-vectors-tools' "linked" skeleton layout: a stored `[child, parent]`
+   * record replaces the parent implied by row order instead of adding to it.
+   */
+  readonly linkedSkeletonLayout?: boolean;
+  /**
+   * Vertices whose implied parent edge is replaced by a cross-chunk record
+   * (linked layout only); see {@link linkedSkeletonLayout}.
+   */
+  readonly relinkedChildren?: ReadonlySet<number>;
   /** How vertex-to-vertex edges are encoded for this geometry type. */
   readonly linksConvention: LinksConvention;
   /** Geometry kind (drives whether per-vertex tangents are precomputed). */
@@ -260,16 +272,9 @@ async function readChunkBlob(
   chunkKey: string,
   signal: AbortSignal,
 ): Promise<Uint8Array | undefined> {
-  const chunkBytes = await cellRead(arrayPath, chunkKey, signal);
-  if (chunkBytes === undefined) return undefined;
-  try {
-    const element = readVlenBytesElement(chunkBytes, 0);
-    return element.byteLength === 0 ? undefined : element;
-  } catch (e) {
-    // N=0: a populated grid cell that encodes no blob.
-    if (e instanceof RangeError) return undefined;
-    throw e;
-  }
+  const payload = await cellRead(arrayPath, chunkKey, signal);
+  if (payload === undefined || payload.byteLength === 0) return undefined;
+  return payload;
 }
 
 /**
@@ -490,19 +495,20 @@ export async function downloadGeometryChunk(
   if (vertexBytes === undefined || vertexBytes.byteLength === 0) {
     return undefined;
   }
-  const bytesPerVertex = rank * 4; // float32
+  const vertexDtype = options.vertexDtype ?? "float32";
+  const bytesPerVertex = rank * ATTRIBUTE_ELEMENT_BYTES[vertexDtype];
   if (vertexBytes.byteLength % bytesPerVertex !== 0) {
     throw new Error(
       `zarr-vectors vertices/${chunkKey}: ${vertexBytes.byteLength} bytes ` +
-        `not a multiple of ${bytesPerVertex} (rank=${rank} * float32)`,
+        `not a multiple of ${bytesPerVertex} (rank=${rank} * ${vertexDtype})`,
     );
   }
   const numVertices = vertexBytes.byteLength / bytesPerVertex;
-  const positions = reinterpretBytes(
+  const positions = decodeAttributeToFloat32(
     vertexBytes,
-    "float32",
+    vertexDtype,
     numVertices * rank,
-  ) as Float32Array;
+  );
 
   // 2. Fragment index — required.
   const fragmentBytes = await fragmentBytesPromise;
@@ -586,8 +592,12 @@ export async function downloadGeometryChunk(
   const vertexAttributes: AttributeTypedArray[] = attributeBlobs.map(
     (bytes, i) =>
       bytes === undefined
-        ? zeroAttribute(numVertices)
-        : decodeAttributeToFloat32(bytes, attributeDtypes[i], numVertices),
+        ? zeroAttribute(numVertices * (options.attributeComponents?.[i] ?? 1))
+        : decodeAttributeToFloat32(
+            bytes,
+            attributeDtypes[i],
+            numVertices * (options.attributeComponents?.[i] ?? 1),
+          ),
   );
 
   // 5. Per-fragment segment_id → synthesised per-vertex "segment" column.
@@ -685,166 +695,7 @@ export async function downloadGeometryChunk(
     nodeIds,
     faces,
     faceArity: linkWidth,
+    linkedSkeletonLayout: options.linkedSkeletonLayout,
+    relinkedChildren: options.relinkedChildren,
   });
-}
-
-/**
- * One request for a ghost vertex.  `hostLocalVertex` identifies the
- * endpoint in the current chunk; `neighborChunkKey` + `neighborLocalVertex`
- * identify the source vertex in a different chunk to copy into the host.
- */
-export interface GhostVertexRequest {
-  readonly hostLocalVertex: number;
-  readonly neighborChunkKey: string;
-  readonly neighborLocalVertex: number;
-  /**
-   * True when the neighbor's vertex precedes the host in the
-   * streamline's walk order.  Forwarded onto the resulting
-   * `GhostVertexRecord` so `appendGhostVertices` can flip the
-   * synthesised ghost-tangent sign accordingly.  Defaults to `false`
-   * (ghost is the successor) when callers don't specify it.
-   */
-  readonly isGhostPredecessor?: boolean;
-}
-
-/**
- * Slice a single float32×rank vertex out of a `vertices/<key>/c/0` byte
- * blob.  Returns `undefined` when the requested index is out of range —
- * caller drops the ghost in that case (avoids dangling references on
- * sparse / writer-inconsistent stores).
- */
-function sliceVertexFromBytes(
-  bytes: Uint8Array,
-  vertexIndex: number,
-  rank: number,
-): Float32Array | undefined {
-  const bytesPerVertex = rank * 4;
-  const offset = vertexIndex * bytesPerVertex;
-  if (vertexIndex < 0 || offset + bytesPerVertex > bytes.byteLength) {
-    return undefined;
-  }
-  // Reinterpret a `rank`-element float32 slice.  Subarray gives a
-  // zero-copy view; reinterpretBytes handles alignment.
-  return reinterpretBytes(
-    bytes.subarray(offset, offset + bytesPerVertex),
-    "float32",
-    rank,
-  ) as Float32Array;
-}
-
-/**
- * Slice a single attribute element from a `vertex_attributes/<name>/<key>/c/0`
- * byte blob, packaged as a length-1 typed-array of the declared dtype.
- * Returns `undefined` when the requested index is out of range.
- */
-function sliceAttributeFromBytes(
-  bytes: Uint8Array,
-  vertexIndex: number,
-  dtype: AttributeDtype,
-): AttributeTypedArray | undefined {
-  const elementSize = BYTES_PER_ELEMENT[dtype];
-  const offset = vertexIndex * elementSize;
-  if (vertexIndex < 0 || offset + elementSize > bytes.byteLength) {
-    return undefined;
-  }
-  return decodeAttributeToFloat32(
-    bytes.subarray(offset, offset + elementSize),
-    dtype,
-    1,
-  );
-}
-
-/**
- * Fetch + slice one ghost vertex per request, grouping by
- * `neighborChunkKey` so each unique neighbor's `vertices/` and per-
- * attribute files are fetched exactly once.  Subsequent fetches for the
- * same key are served from the kvstore cache (and when the neighbor
- * loads as its own render chunk, every byte is already cached — the
- * "prefetch" reorders work rather than adding net traffic).
- *
- * Requests whose neighbor's `vertices/` blob is absent are silently
- * dropped (sparse chunk presence; we never emit a dangling reference).
- * Requests whose `vertex_attributes/<name>/` blob is absent get a
- * zero-filled value for that attribute — same rule the per-chunk
- * download applies for pyramid levels that don't propagate attributes.
- */
-export async function fetchGhostVertices(
-  requests: readonly GhostVertexRequest[],
-  options: {
-    readonly rank: number;
-    readonly attributeNames: readonly string[];
-    readonly attributeDtypes: readonly AttributeDtype[];
-    readonly cellRead: GeometryChunkDownloadOptions["cellRead"];
-  },
-  signal: AbortSignal,
-): Promise<GhostVertexRecord[]> {
-  const { rank, attributeNames, attributeDtypes, cellRead } = options;
-  if (requests.length === 0) return [];
-
-  // 1. Group by neighbor chunk key — one fetch per unique key per file.
-  const uniqueKeys = Array.from(
-    new Set(requests.map((r) => r.neighborChunkKey)),
-  );
-
-  // 2. Fetch positions + each attribute for each unique key in parallel.
-  type NeighborBlobs = {
-    positions: Uint8Array | undefined;
-    attrs: Array<Uint8Array | undefined>;
-  };
-  const byKey = new Map<string, NeighborBlobs>();
-  await Promise.all(
-    uniqueKeys.map(async (key) => {
-      const [positions, ...attrs] = await Promise.all([
-        readChunkBlob(cellRead, "vertices", key, signal),
-        ...attributeNames.map((name) =>
-          readChunkBlob(cellRead, `vertex_attributes/${name}`, key, signal),
-        ),
-      ]);
-      byKey.set(key, { positions, attrs });
-    }),
-  );
-
-  // 3. Slice each request's element.  Drop requests whose neighbor
-  // positions blob is absent (sparse chunk) or whose vertex index is
-  // out of range — these would otherwise create dangling bridge edges.
-  const out: GhostVertexRecord[] = [];
-  for (let requestIndex = 0; requestIndex < requests.length; ++requestIndex) {
-    const req = requests[requestIndex];
-    const blobs = byKey.get(req.neighborChunkKey);
-    if (blobs === undefined || blobs.positions === undefined) continue;
-    const position = sliceVertexFromBytes(
-      blobs.positions,
-      req.neighborLocalVertex,
-      rank,
-    );
-    if (position === undefined) continue;
-    const attributes: AttributeTypedArray[] = [];
-    for (let i = 0; i < attributeNames.length; ++i) {
-      const bytes = blobs.attrs[i];
-      const sliced =
-        bytes === undefined
-          ? undefined
-          : sliceAttributeFromBytes(
-              bytes,
-              req.neighborLocalVertex,
-              attributeDtypes[i],
-            );
-      if (sliced === undefined) {
-        // Zero-fill missing attribute — mirrors `downloadGeometryChunk`
-        // behavior for chunk-local attributes (pyramid levels without
-        // `vertex_attributes/<name>/`).
-        attributes.push(zeroAttribute(1));
-      } else {
-        attributes.push(sliced);
-      }
-    }
-    out.push({
-      position,
-      attributes,
-      bridgeFromLocalVertex: req.hostLocalVertex,
-      isGhostPredecessor: req.isGhostPredecessor ?? false,
-      requestIndex,
-    });
-  }
-  return out;
 }
