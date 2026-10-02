@@ -149,9 +149,9 @@ class PositionCache {
 const positionCache = new PositionCache(256 * 1024 * 1024);
 
 /** Rows this close together are read together (12 bytes each for float32). */
-const RANGE_GAP_VERTICES = 1024;
+const RANGE_GAP_VERTICES = 4096;
 /** More reads than this into one neighbour, and the whole cell is fetched. */
-const MAX_RANGE_READS = 4;
+const MAX_RANGE_READS = 16;
 /** Loads shared between requests must not be cancelled by any one of them. */
 const SHARED_SIGNAL = new AbortController().signal;
 

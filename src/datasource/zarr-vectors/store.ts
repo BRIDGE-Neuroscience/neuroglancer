@@ -539,13 +539,23 @@ async function selectAttributes(
     candidates = [...selected];
   } else {
     const declared = zv?.attribute_specs?.vertex;
-    const listed = await listOrEmpty(
-      access,
-      `${levelPath}/vertex_attributes`,
-      warnings,
-      "vertex attributes",
+    // A level without the group simply has no attributes; only list if the
+    // group exists, so an absent directory is not reported as a failure.
+    const group = await readJson(
+      access.read,
+      `${levelPath}/vertex_attributes/zarr.json`,
       signal,
     );
+    const listed =
+      group === undefined
+        ? []
+        : await listOrEmpty(
+            access,
+            `${levelPath}/vertex_attributes`,
+            warnings,
+            "vertex attributes",
+            signal,
+          );
     const names = new Set(listed);
     if (declared !== null && typeof declared === "object") {
       for (const name of Object.keys(declared)) names.add(name);
@@ -553,6 +563,19 @@ async function selectAttributes(
     // The renderer synthesises `tangent`; a stored one would shadow it.
     names.delete("tangent");
     candidates = [...names].sort();
+    if (candidates.length > DEFAULT_ATTRIBUTE_LIMIT) {
+      // A wide panel (one column per gene) would fetch that many cells per
+      // chunk for columns nobody asked for; let the user choose.
+      warnings.push(
+        `store has ${candidates.length} vertex attributes; none are loaded ` +
+          "by default. Append #attributes=a,b,c to the source URL to choose " +
+          `up to ${MAX_ATTRIBUTES} (e.g. #attributes=${candidates
+            .slice(0, 3)
+            .map(encodeURIComponent)
+            .join(",")})`,
+      );
+      candidates = [];
+    }
   }
   const limit =
     selected !== undefined ? MAX_ATTRIBUTES : DEFAULT_ATTRIBUTE_LIMIT;

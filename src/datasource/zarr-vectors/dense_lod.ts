@@ -68,40 +68,54 @@ export function selectDenseLevel(
 ): number {
   const numLevels = transformedSources.length;
   if (numLevels <= 1) return 0;
-  const {
-    displayDimensionRenderInfo,
-    viewMatrix,
-    projectionMat,
-    width,
-    height,
-  } = projectionParameters;
-  const canonicalToPhysical = prod3(
-    displayDimensionRenderInfo.voxelPhysicalScales,
-  );
+  const { projectionMat, viewMatrix, width, height } = projectionParameters;
+  const base = transformedSources[0];
+  // Volume and length of one stored unit in display (canonical) units.
+  const unitVolume = Math.abs(base.chunkLayout.detTransform);
+  const unitLength = Math.cbrt(unitVolume);
+  const extent: number[] = [];
+  for (let i = 0; i < 3; ++i) {
+    extent.push(
+      (base.upperClipDisplayBound[i] - base.lowerClipDisplayBound[i]) /
+        unitLength,
+    );
+  }
+  const sourceVolume = extent[0] * extent[1] * extent[2];
+  // What each level would LOAD for this view, in stored units.  A
+  // cross-section loads every chunk the plane cuts, so a slab one chunk deep;
+  // a 3-d view loads what its frustum covers.
+  // The view matrix scales display units to view units (a slice view's are
+  // pixels); undo it to measure the view in display units.
   const viewDet = Math.abs(
     mat3.determinant(mat3FromMat4(tempMat3, viewMatrix)),
   );
-  const frustumVolume =
-    (viewFrustumVolume(projectionMat) / viewDet) * canonicalToPhysical;
-  const base = transformedSources[0];
-  let sourceVolume =
-    Math.abs(base.chunkLayout.detTransform) * canonicalToPhysical;
-  for (let i = 0; i < 3; ++i) {
-    sourceVolume *=
-      base.upperClipDisplayBound[i] - base.lowerClipDisplayBound[i];
+  let loadedVolume: (level: number) => number;
+  if (projectionMat[15] === 1) {
+    const pixelSize =
+      2 / Math.abs(projectionMat[0]) / width / Math.cbrt(viewDet) / unitLength;
+    const sortedExtent = [...extent].sort((a, b) => b - a);
+    const viewArea =
+      Math.min(width * pixelSize, sortedExtent[0]) *
+      Math.min(height * pixelSize, sortedExtent[1]);
+    loadedVolume = (level) => {
+      const chunk = transformedSources[level].source.spec.chunkDataSize;
+      const depth = Math.min(
+        Math.cbrt(chunk[0] * chunk[1] * chunk[2]),
+        sortedExtent[2],
+      );
+      return viewArea * depth;
+    };
+  } else {
+    const frustum = viewFrustumVolume(projectionMat) / viewDet / unitVolume;
+    const volume = Math.min(frustum, sourceVolume);
+    loadedVolume = () => volume;
   }
-  const effectiveVolume = Math.min(sourceVolume, frustumVolume);
-  if (!(effectiveVolume > 0)) return numLevels - 1;
-  // Vertices the view wants: one per `renderScaleTarget` pixels of extent.
-  const targetCount = (width * height) / Math.max(renderScaleTarget, 1e-3) ** 2;
-  // Densities are per stored unit volume; convert to the physical volume above.
-  const storedToPhysical =
-    Math.abs(base.chunkLayout.detTransform) * canonicalToPhysical;
-  for (let level = numLevels - 1; level > 0; --level) {
-    const physicalDensity = densities[level] / storedToPhysical;
-    if (physicalDensity * effectiveVolume >= targetCount) return level;
+  // Vertex budget: one per `renderScaleTarget`^2 pixels.
+  const budget = (width * height) / Math.max(renderScaleTarget, 1e-3) ** 2;
+  for (let level = 0; level < numLevels - 1; ++level) {
+    if (densities[level] * loadedVolume(level) <= budget) return level;
   }
-  return 0;
+  return numLevels - 1;
 }
 
 /**

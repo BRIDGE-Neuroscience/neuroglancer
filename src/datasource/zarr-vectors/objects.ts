@@ -293,11 +293,20 @@ export class SegmentIdIndex {
   }
 }
 
-/** Group id per row (`-1` for none) and group names. */
+/** Group membership per row, and group names. */
 export interface ZarrVectorsGroups {
   names: string[];
+  /** First group of each row (`-1` for none). */
   groupByRow: Int32Array;
-  overlaps: number;
+  /** Every group of the rows that belong to more than one. */
+  moreGroups: Map<number, number[]>;
+}
+
+/** The groups of `row`, ascending. */
+export function groupsOf(groups: ZarrVectorsGroups, row: number): number[] {
+  const first = groups.groupByRow[row];
+  if (first < 0) return [];
+  return groups.moreGroups.get(row) ?? [first];
 }
 
 function groupNames(attrs: any, count: number): string[] {
@@ -337,7 +346,7 @@ export async function readGroups(
     table.objectIds === undefined
       ? undefined
       : new SegmentIdIndex(table.objectIds);
-  let overlaps = 0;
+  const moreGroups = new Map<number, number[]>();
   const assign = (objectId: bigint, gid: number) => {
     const row =
       rowIndex === undefined
@@ -346,8 +355,15 @@ export async function readGroups(
           : undefined
         : rowIndex.rowOf(objectId);
     if (row === undefined) return;
-    if (groupByRow[row] !== -1) ++overlaps;
-    groupByRow[row] = gid;
+    const first = groupByRow[row];
+    if (first === -1) {
+      groupByRow[row] = gid;
+    } else if (first !== gid) {
+      // Groups may overlap (a cell in several classes); keep them all.
+      let list = moreGroups.get(row);
+      if (list === undefined) moreGroups.set(row, (list = [first]));
+      if (!list.includes(gid)) list.push(gid);
+    }
   };
   const ranges = attrs.group_ranges;
   for (let gid = 0; gid < numGroups; ++gid) {
@@ -365,7 +381,8 @@ export async function readGroups(
       assign(view.getBigUint64(i, true), gid);
     }
   }
-  return { names, groupByRow, overlaps };
+  for (const list of moreGroups.values()) list.sort((a, b) => a - b);
+  return { names, groupByRow, moreGroups };
 }
 
 /**
@@ -467,12 +484,6 @@ export async function readSegmentProperties(
       return undefined;
     },
   );
-  if (groups !== undefined && groups.overlaps > 0) {
-    warnings.push(
-      `${groups.overlaps} object(s) belong to several groups; each is tagged ` +
-        "with the last one",
-    );
-  }
   if (properties.length === 0 && groups === undefined) return undefined;
 
   const keep: number[] = [];
@@ -499,11 +510,10 @@ export async function readSegmentProperties(
     const tagValues = new Array<string>(keep.length);
     const labels = new Array<string>(keep.length);
     for (let i = 0; i < keep.length; ++i) {
-      const gid = groups.groupByRow[keep[i]];
-      // One tag per object: the group id as a character code, as
-      // `InlineSegmentTagsProperty` encodes tag sets.
-      tagValues[i] = gid < 0 ? "" : String.fromCharCode(gid);
-      labels[i] = gid < 0 ? "" : groups.names[gid];
+      const gids = groupsOf(groups, keep[i]);
+      // A tag set is a string of ascending, distinct character codes.
+      tagValues[i] = String.fromCharCode(...gids);
+      labels[i] = gids.map((g) => groups.names[g]).join(", ");
     }
     compacted.push({
       id: "group",
