@@ -84,7 +84,11 @@ export class ConfigSync {
     if (ui !== undefined) {
       for (const key of UI_KEYS) {
         const value = config?.[key];
-        if (value !== undefined && ui[key] !== undefined && "value" in ui[key]) {
+        if (
+          value !== undefined &&
+          ui[key] !== undefined &&
+          "value" in ui[key]
+        ) {
           ui[key].value = value;
         }
       }
@@ -102,7 +106,11 @@ export class ConfigSync {
       }
     }
     for (const name of wanted) {
-      if (this.actionListeners.has(name) || name === "screenshot" || name === "screenshotStatistics") {
+      if (
+        this.actionListeners.has(name) ||
+        name === "screenshot" ||
+        name === "screenshotStatistics"
+      ) {
         continue;
       }
       const listener = () => this.hooks.sendAction(name, this.actionState());
@@ -146,7 +154,8 @@ export class ConfigSync {
         if (Ctor !== undefined && typeof parentMap.addParent === "function") {
           try {
             child = new Ctor();
-            for (const t of targets) ieb[t]?.addParent(child, scope === "dataView" ? 999 : 1000);
+            for (const t of targets)
+              ieb[t]?.addParent(child, scope === "dataView" ? 999 : 1000);
             this.bindingMaps.set(scope, child);
           } catch {
             child = undefined;
@@ -155,7 +164,8 @@ export class ConfigSync {
       }
       if (child !== undefined) {
         child.clear?.();
-        for (const [key, action] of Object.entries(entries)) child.set(key, action);
+        for (const [key, action] of Object.entries(entries))
+          child.set(key, action);
       } else {
         for (const t of targets) {
           const map = ieb[t];

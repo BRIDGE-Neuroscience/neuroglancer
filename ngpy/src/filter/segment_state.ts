@@ -101,7 +101,8 @@ export function normalizeColor(c: string): string {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(c.trim());
   if (m !== null) return `#${m[1].toLowerCase()}`;
   const s = /^#?([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/.exec(c.trim());
-  if (s !== null) return `#${s[1]}${s[1]}${s[2]}${s[2]}${s[3]}${s[3]}`.toLowerCase();
+  if (s !== null)
+    return `#${s[1]}${s[1]}${s[2]}${s[2]}${s[3]}${s[3]}`.toLowerCase();
   return c;
 }
 
@@ -137,7 +138,10 @@ export function applyToViewerStateJson(
   if (layers && typeof layers === "object" && layerName in layers) {
     return {
       ...state,
-      layers: { ...layers, [layerName]: applyToLayerJson(layers[layerName], update) },
+      layers: {
+        ...layers,
+        [layerName]: applyToLayerJson(layers[layerName], update),
+      },
     };
   }
   throw new Error(`no layer named ${JSON.stringify(layerName)}`);
@@ -204,7 +208,7 @@ export function readLayerSegmentState(layerJson: any): SegmentStateUpdate {
     segments: Array.isArray(layerJson?.segments)
       ? layerJson.segments.map(String)
       : [],
-    segmentColors: { ...(layerJson?.segmentColors ?? {}) },
+    segmentColors: { ...layerJson?.segmentColors },
     notSelectedAlpha: Number(layerJson?.notSelectedAlpha ?? 0),
     ignoreNullVisibleSet: layerJson?.ignoreNullVisibleSet !== false,
   };

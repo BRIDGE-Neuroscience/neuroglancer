@@ -25,9 +25,6 @@
  * promising entry under the worker's mutex.
  */
 
-import type { FilterController } from "../filter/controller.js";
-import type { StorePanel } from "../store/panel.js";
-import { button, downloadBlob, field, h, section, select, setStatus } from "../ui/dom.js";
 import type { ExportFormat, ExportScope } from "./spec.js";
 import {
   buildJobSpec,
@@ -36,6 +33,17 @@ import {
   formatAffineText,
   parseAffineText,
 } from "./spec.js";
+import type { FilterController } from "../filter/controller.js";
+import type { StorePanel } from "../store/panel.js";
+import {
+  button,
+  downloadBlob,
+  field,
+  h,
+  section,
+  select,
+  setStatus,
+} from "../ui/dom.js";
 
 export class ExportPanel {
   readonly element = h("div", { class: "ngpy-panel ngpy-export" });
@@ -74,8 +82,14 @@ export class ExportPanel {
           "Scope",
           select(
             [
-              { value: "selected", label: `Visible groups (${visibleGroups.length})` },
-              { value: "whole", label: "Whole store (every object at the level)" },
+              {
+                value: "selected",
+                label: `Visible groups (${visibleGroups.length})`,
+              },
+              {
+                value: "whole",
+                label: "Whole store (every object at the level)",
+              },
             ],
             this.scope,
             (v) => {
@@ -89,7 +103,10 @@ export class ExportPanel {
           select(
             [
               { value: "trk", label: "TrackVis .trk" },
-              { value: "zvf", label: `zarr-vectors store (.zvf.zip)${c.python.jspi ? "" : " — needs JSPI"}` },
+              {
+                value: "zvf",
+                label: `zarr-vectors store (.zvf.zip)${c.python.jspi ? "" : " — needs JSPI"}`,
+              },
             ],
             this.format,
             (v) => {
@@ -119,7 +136,8 @@ export class ExportPanel {
                 rows: 4,
                 class: "ngpy-affine",
                 value: this.affineText ?? "",
-                onchange: (e: Event) => (this.affineText = (e.target as HTMLTextAreaElement).value),
+                onchange: (e: Event) =>
+                  (this.affineText = (e.target as HTMLTextAreaElement).value),
               }),
               "4×4 written into the TRK header; pre-filled from the store's unit. Blank = identity.",
             )
@@ -129,7 +147,8 @@ export class ExportPanel {
           h("input", {
             type: "text",
             value: this.fileName,
-            onchange: (e: Event) => (this.fileName = (e.target as HTMLInputElement).value),
+            onchange: (e: Event) =>
+              (this.fileName = (e.target as HTMLInputElement).value),
           }),
         ),
       ),
@@ -138,10 +157,14 @@ export class ExportPanel {
         h(
           "div",
           { class: "ngpy-row" },
-          button("Download", () => void this.run("download"), { disabled: this.busy }),
+          button("Download", () => void this.run("download"), {
+            disabled: this.busy,
+          }),
           button("Save to GCS", () => void this.run("gcs"), {
             disabled: this.busy || !this.store.configured(),
-            title: this.store.configured() ? "Upload under exports/ in the ROI-store bucket" : "Configure the ROI store first (Store tab)",
+            title: this.store.configured()
+              ? "Upload under exports/ in the ROI-store bucket"
+              : "Configure the ROI store first (Store tab)",
           }),
           button("Download job spec", () => void this.downloadSpec()),
         ),
@@ -154,18 +177,20 @@ export class ExportPanel {
     const c = this.controller;
     const info = c.storeInfo ?? (await c.loadStoreInfo());
     const source = c.sourceUrl();
-    if (info === undefined || source === undefined) throw new Error("Choose a target layer on the Filter tab first.");
+    if (info === undefined || source === undefined)
+      throw new Error("Choose a target layer on the Filter tab first.");
     const level = this.level ?? c.lastResult?.level ?? info.defaultLevel;
     let groups: any[] = [];
     if (this.scope === "selected") {
       const request = c.buildRequest();
-      const visible = (request?.groups ?? []).filter((g: any) => g.id !== 0 && g.visible);
+      const visible = (request?.groups ?? []).filter(
+        (g: any) => g.id !== 0 && g.visible,
+      );
       if (visible.length === 0) throw new Error("No visible group to export.");
       setStatus(this.status, "Selecting objects…", "busy");
-      const ids = await c.python.callJson<{ name: string; objectIds: string[] }[]>(
-        "filter_passing_ids",
-        { ...request, groups: visible },
-      );
+      const ids = await c.python.callJson<
+        { name: string; objectIds: string[] }[]
+      >("filter_passing_ids", { ...request, groups: visible });
       groups = visible.map((g: any, i: number) => ({
         name: g.name,
         color: g.color,
@@ -179,7 +204,10 @@ export class ExportPanel {
       format: this.format,
       scope: this.scope,
       groups,
-      affine: this.format === "trk" ? parseAffineText(this.affineText ?? "") : undefined,
+      affine:
+        this.format === "trk"
+          ? parseAffineText(this.affineText ?? "")
+          : undefined,
       fileName: this.fileName,
       destination,
     });
@@ -192,15 +220,20 @@ export class ExportPanel {
     try {
       const spec = await this.buildSpec(destination);
       setStatus(this.status, `Exporting ${this.format.toUpperCase()}…`, "busy");
-      const [contentType, body, summaryJson] = await this.controller.python.call<[string, Uint8Array, string]>(
-        "export",
-        [JSON.stringify(spec)],
-        this.format === "zvf",
-      );
+      const [contentType, body, summaryJson] =
+        await this.controller.python.call<[string, Uint8Array, string]>(
+          "export",
+          [JSON.stringify(spec)],
+          this.format === "zvf",
+        );
       const summary = JSON.parse(summaryJson);
       if (summary.error) throw new Error(summary.error);
       if (summary.written === false || contentType === "application/json") {
-        setStatus(this.status, summary.message ?? "Nothing to export.", "error");
+        setStatus(
+          this.status,
+          summary.message ?? "Nothing to export.",
+          "error",
+        );
         return;
       }
       const name = exportFileName(this.fileName, this.format);
@@ -214,8 +247,16 @@ export class ExportPanel {
         );
       } else {
         setStatus(this.status, "Uploading…", "busy");
-        const objectName = await this.store.uploadExport(name, blob, contentType);
-        setStatus(this.status, `Uploaded ${Number(summary.streamline_count).toLocaleString()} streamlines as ${objectName}.`, "ok");
+        const objectName = await this.store.uploadExport(
+          name,
+          blob,
+          contentType,
+        );
+        setStatus(
+          this.status,
+          `Uploaded ${Number(summary.streamline_count).toLocaleString()} streamlines as ${objectName}.`,
+          "ok",
+        );
       }
     } catch (e) {
       setStatus(this.status, `Export failed: ${(e as Error).message}`, "error");

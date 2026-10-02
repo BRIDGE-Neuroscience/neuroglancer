@@ -22,7 +22,7 @@ export class Signal<T extends unknown[] = []> {
     return () => this.handlers.delete(handler);
   }
   dispatch(...args: T): void {
-    for (const h of [...this.handlers]) h(...args);
+    for (const h of Array.from(this.handlers)) h(...args);
   }
 }
 

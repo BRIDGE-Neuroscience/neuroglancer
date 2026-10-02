@@ -17,7 +17,10 @@
 /** Page parameters, the wrapper's URL state, and iframe URL building. */
 
 import { describe, expect, it } from "vitest";
-import { isSameOrigin, viewerUrlWithState } from "../../ngpy/src/host/viewer_host.js";
+import {
+  isSameOrigin,
+  viewerUrlWithState,
+} from "../../ngpy/src/host/viewer_host.js";
 import {
   buildWrapperHash,
   DEFAULT_NG_URL,
@@ -51,7 +54,13 @@ describe("parseParams", () => {
 describe("the wrapper hash", () => {
   const viewer = {
     layers: [
-      { name: "tracts", type: "segmentation", segments: ["1", "2"], segmentColors: { "1": "#f00" }, source: "s" },
+      {
+        name: "tracts",
+        type: "segmentation",
+        segments: ["1", "2"],
+        segmentColors: { "1": "#f00" },
+        source: "s",
+      },
       { name: "img", type: "image", source: "t" },
     ],
     layout: "3d",
@@ -61,21 +70,36 @@ describe("the wrapper hash", () => {
     const hash = buildWrapperHash(viewer, { filter: { groups: [] } }, "tracts");
     const back = parseWrapperHash(hash);
     expect(back.ngpy).toEqual({ filter: { groups: [] } });
-    expect(back.viewer.layers[0]).toEqual({ name: "tracts", type: "segmentation", source: "s" });
+    expect(back.viewer.layers[0]).toEqual({
+      name: "tracts",
+      type: "segmentation",
+      source: "s",
+    });
     expect(back.viewer.layers[1]).toEqual(viewer.layers[1]);
     expect(back.viewer.layout).toBe("3d");
   });
 
   it("keeps segments when no layer is filter-managed", () => {
-    const back = parseWrapperHash(buildWrapperHash(viewer, undefined, undefined));
+    const back = parseWrapperHash(
+      buildWrapperHash(viewer, undefined, undefined),
+    );
     expect(back.viewer.layers[0].segments).toEqual(["1", "2"]);
   });
 
   it("accepts a plain Neuroglancer #! link and ignores junk", () => {
     const plain = `#!${encodeURIComponent(JSON.stringify({ layout: "xy" }))}`;
-    expect(parseWrapperHash(plain)).toEqual({ viewer: { layout: "xy" }, ngpy: undefined });
-    expect(parseWrapperHash("#!not-json")).toEqual({ viewer: undefined, ngpy: undefined });
-    expect(parseWrapperHash("")).toEqual({ viewer: undefined, ngpy: undefined });
+    expect(parseWrapperHash(plain)).toEqual({
+      viewer: { layout: "xy" },
+      ngpy: undefined,
+    });
+    expect(parseWrapperHash("#!not-json")).toEqual({
+      viewer: undefined,
+      ngpy: undefined,
+    });
+    expect(parseWrapperHash("")).toEqual({
+      viewer: undefined,
+      ngpy: undefined,
+    });
   });
 });
 
@@ -86,17 +110,21 @@ describe("?script=", () => {
     expect(resolveScriptUrl("examples/a.py", page).href).toBe(
       "http://localhost:8000/examples/a.py",
     );
-    expect(resolveScriptUrl("/s.py", "http://localhost:8000/?script=/s.py").href).toBe(
-      "http://localhost:8000/s.py",
+    expect(
+      resolveScriptUrl("/s.py", "http://localhost:8000/?script=/s.py").href,
+    ).toBe("http://localhost:8000/s.py");
+    expect(() => resolveScriptUrl("https://evil.example/x.py", page)).toThrow(
+      /origin/,
     );
-    expect(() => resolveScriptUrl("https://evil.example/x.py", page)).toThrow(/origin/);
   });
 });
 
 describe("hosting", () => {
   it("knows same-origin from cross-origin builds", () => {
     expect(isSameOrigin("./index.html", "http://a.test/ngpy.html")).toBe(true);
-    expect(isSameOrigin("https://b.test/", "http://a.test/ngpy.html")).toBe(false);
+    expect(isSameOrigin("https://b.test/", "http://a.test/ngpy.html")).toBe(
+      false,
+    );
   });
 
   it("puts a state in the iframe URL as a #! hash", () => {

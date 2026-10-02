@@ -18,6 +18,7 @@ import json
 
 import neuroglancer
 import pytest
+
 from ngpy import api, bridge
 
 
@@ -165,7 +166,9 @@ def test_the_viewers_new_layer_placeholder_is_not_passed_to_python():
     # which upstream's make_layer rejects (ValueError on every txn).
     _client(
         {
-            "layers": [{"type": "new", "source": "", "tab": "source", "name": "new layer"}],
+            "layers": [
+                {"type": "new", "source": "", "tab": "source", "name": "new layer"}
+            ],
             "selectedLayer": {"visible": True, "layer": "new layer"},
             "layout": "4panel-alt",
         },

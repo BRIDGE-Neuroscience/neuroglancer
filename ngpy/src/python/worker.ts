@@ -53,7 +53,9 @@ function post(msg: FromWorker, transfer: Transferable[] = []) {
 
 function jspiAvailable(): boolean {
   const wa = WebAssembly as any;
-  return typeof wa.Suspending === "function" || typeof wa.promising === "function";
+  return (
+    typeof wa.Suspending === "function" || typeof wa.promising === "function"
+  );
 }
 
 let promisingTail: Promise<unknown> = Promise.resolve();
@@ -67,12 +69,18 @@ function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function init(msg: Extract<ToWorker, { type: "init" }>) {
-  const indexURL = msg.indexURL.endsWith("/") ? msg.indexURL : msg.indexURL + "/";
+  const indexURL = msg.indexURL.endsWith("/")
+    ? msg.indexURL
+    : msg.indexURL + "/";
   post({ type: "progress", message: "Loading Pyodide runtime…" });
   const mod: any = await import(/* @vite-ignore */ `${indexURL}pyodide.mjs`);
   pyodide = await mod.loadPyodide({ indexURL });
-  pyodide.setStdout({ batched: (text: string) => post({ type: "stdout", text }) });
-  pyodide.setStderr({ batched: (text: string) => post({ type: "stderr", text }) });
+  pyodide.setStdout({
+    batched: (text: string) => post({ type: "stdout", text }),
+  });
+  pyodide.setStderr({
+    batched: (text: string) => post({ type: "stderr", text }),
+  });
   post({ type: "progress", message: "Loading numpy, micropip and zarr…" });
   await pyodide.loadPackage(["numpy", "micropip", "zarr"], {
     messageCallback: () => {},
@@ -137,7 +145,12 @@ self.addEventListener("message", async (event: MessageEvent<ToWorker>) => {
     return;
   }
   if (pyodide === undefined) {
-    post({ type: "result", id: msg.id, ok: false, error: "Pyodide is not ready" });
+    post({
+      type: "result",
+      id: msg.id,
+      ok: false,
+      error: "Pyodide is not ready",
+    });
     return;
   }
   try {
@@ -154,7 +167,8 @@ self.addEventListener("message", async (event: MessageEvent<ToWorker>) => {
     }
     const transfer: Transferable[] = [];
     if (Array.isArray(value)) {
-      for (const v of value) if (v instanceof Uint8Array) transfer.push(v.buffer);
+      for (const v of value)
+        if (v instanceof Uint8Array) transfer.push(v.buffer);
     }
     post({ type: "result", id: msg.id, ok: true, value }, transfer);
   } catch (e) {

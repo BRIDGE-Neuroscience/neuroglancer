@@ -345,9 +345,7 @@ class StoreInfo:
         """The finest level whose vertex count fits ``budget`` (else coarsest)."""
         if not self.levels:
             return 0
-        fitting = [
-            lv.level for lv in self.levels if 0 < lv.vertex_count <= budget
-        ]
+        fitting = [lv.level for lv in self.levels if 0 < lv.vertex_count <= budget]
         if fitting:
             return min(fitting)
         return max(lv.level for lv in self.levels)

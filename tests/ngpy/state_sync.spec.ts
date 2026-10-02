@@ -21,7 +21,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { SetStateMessage, TrackableLike } from "../../ngpy/src/host/state_sync.js";
+import type {
+  SetStateMessage,
+  TrackableLike,
+} from "../../ngpy/src/host/state_sync.js";
 import { SharedStateSync } from "../../ngpy/src/host/state_sync.js";
 
 class FakeTrackable implements TrackableLike {
@@ -84,7 +87,9 @@ describe("SharedStateSync", () => {
     await new Promise((r) => setTimeout(r, 5));
     expect(py.messages).toHaveLength(0);
     await sync.enable();
-    expect(py.messages).toEqual([{ s: { layout: "xy" }, g: 1, pg: "", c: "cid" }]);
+    expect(py.messages).toEqual([
+      { s: { layout: "xy" }, g: 1, pg: "", c: "cid" },
+    ]);
     expect(sync.lastServerGeneration).toBe("cid/1");
   });
 
@@ -93,7 +98,10 @@ describe("SharedStateSync", () => {
     await sync.enable();
     t.set({ layout: "3d" });
     await sync.flush();
-    expect(py.messages.at(-1)).toMatchObject({ s: { layout: "3d" }, pg: "cid/0" });
+    expect(py.messages.at(-1)).toMatchObject({
+      s: { layout: "3d" },
+      pg: "cid/0",
+    });
     const n = py.messages.length;
     t.set({ layout: "3d" }); // same JSON, new generation
     await sync.flush();

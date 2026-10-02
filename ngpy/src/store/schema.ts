@@ -88,7 +88,9 @@ export function makeRoiGroupDocument(options: {
     group: options.group,
     source: options.source,
     ...(options.scene === undefined ? {} : { scene: options.scene }),
-    ...(options.createdBy === undefined ? {} : { createdBy: options.createdBy }),
+    ...(options.createdBy === undefined
+      ? {}
+      : { createdBy: options.createdBy }),
     createdAt: options.createdAt ?? now,
     updatedAt: now,
   };
@@ -106,7 +108,8 @@ function opt<T>(obj: any, key: string, check: (v: any) => T): T | undefined {
 }
 
 function str(v: any): string {
-  if (typeof v !== "string") throw new Error(`Expected string, got ${JSON.stringify(v)}`);
+  if (typeof v !== "string")
+    throw new Error(`Expected string, got ${JSON.stringify(v)}`);
   return v;
 }
 
@@ -149,7 +152,9 @@ export function parseRoiGroupDocument(json: unknown): RoiGroupDocument {
   };
 }
 
-export function roiGroupCustomMetadata(doc: RoiGroupDocument): Record<string, string> {
+export function roiGroupCustomMetadata(
+  doc: RoiGroupDocument,
+): Record<string, string> {
   const metadata: Record<string, string> = {};
   const name = doc.group?.name;
   if (typeof name === "string") metadata.roiGroupName = name;

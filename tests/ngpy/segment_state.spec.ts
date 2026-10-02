@@ -36,13 +36,18 @@ describe("segmentStateFromResult", () => {
       ignoreNullVisibleSet: true,
     });
     expect(
-      segmentStateFromResult({ active: false, segments: ["1"], colors: {} }, OPTS)
-        .ignoreNullVisibleSet,
+      segmentStateFromResult(
+        { active: false, segments: ["1"], colors: {} },
+        OPTS,
+      ).ignoreNullVisibleSet,
     ).toBe(true);
   });
 
   it("an active filter that passes nothing shows nothing", () => {
-    const u = segmentStateFromResult({ active: true, segments: [], colors: {} }, OPTS);
+    const u = segmentStateFromResult(
+      { active: true, segments: [], colors: {} },
+      OPTS,
+    );
     expect(u.segments).toEqual([]);
     expect(u.ignoreNullVisibleSet).toBe(false);
   });
@@ -57,7 +62,11 @@ describe("segmentStateFromResult", () => {
       { ghostAlpha: 1.7, colorByGroup: true },
     );
     expect(u.segments).toEqual(["9", "10", "100", "18446744073709551615"]);
-    expect(u.segmentColors).toEqual({ "9": "#ff0000", "10": "#00ff00", "100": "#00ff00" });
+    expect(u.segmentColors).toEqual({
+      "9": "#ff0000",
+      "10": "#00ff00",
+      "100": "#00ff00",
+    });
     expect(u.notSelectedAlpha).toBe(1);
   });
 
@@ -76,14 +85,24 @@ describe("segmentStateFromResult", () => {
 
 describe("applying the update", () => {
   const update = segmentStateFromResult(
-    { active: true, segments: ["5", "7"], colors: { "5": "#ff0000", "7": "#00ff00" } },
+    {
+      active: true,
+      segments: ["5", "7"],
+      colors: { "5": "#ff0000", "7": "#00ff00" },
+    },
     OPTS,
   );
 
   it("patches only the named layer's JSON (fallback path)", () => {
     const state = {
       layers: [
-        { name: "tracts", type: "segmentation", segments: ["1"], segmentColors: { "1": "#fff" }, shader: "x" },
+        {
+          name: "tracts",
+          type: "segmentation",
+          segments: ["1"],
+          segmentColors: { "1": "#fff" },
+          shader: "x",
+        },
         { name: "other", type: "image" },
       ],
       layout: "3d",
@@ -128,7 +147,8 @@ describe("applying the update", () => {
           value: {
             segmentStatedColors: { clear: () => colors.clear() },
             restoreState: (spec: any) => {
-              for (const [k, v] of Object.entries(spec.segmentColors)) colors.set(BigInt(k), v as string);
+              for (const [k, v] of Object.entries(spec.segmentColors))
+                colors.set(BigInt(k), v as string);
             },
           },
         },
@@ -152,9 +172,10 @@ describe("applying the update", () => {
 
   it("falls back to restoreState when the bulk bigint add is unavailable", () => {
     const { layer, calls } = fakeLayer();
-    layer.displayState.segmentationGroupState.value.visibleSegments.add = () => {
-      throw new TypeError("old Uint64 API");
-    };
+    layer.displayState.segmentationGroupState.value.visibleSegments.add =
+      () => {
+        throw new TypeError("old Uint64 API");
+      };
     expect(applyTargeted(layer, update)).toBe(true);
     expect(calls).toEqual(["group.restoreState"]);
   });

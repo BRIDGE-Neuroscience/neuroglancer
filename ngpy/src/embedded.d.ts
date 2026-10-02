@@ -22,5 +22,9 @@ declare module "ngpy:embedded" {
   export const PAYLOAD_BASE64: string;
   /** `ngpy/examples/hcp1065_demo.py`. */
   export const DEMO_SCRIPT: string;
-  export const BUILD_INFO: { version: string; builtAt: string; zarrVectors: string };
+  export const BUILD_INFO: {
+    version: string;
+    builtAt: string;
+    zarrVectors: string;
+  };
 }

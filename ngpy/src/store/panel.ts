@@ -25,22 +25,34 @@
  * or CAVE middleauth).
  */
 
-import type { FilterController } from "../filter/controller.js";
-import { button, clear, field, h, section, select, setStatus } from "../ui/dom.js";
 import type { RoiStoreAuth, RoiStoreConfig } from "./auth.js";
 import { makeAuth, redirectUri } from "./auth.js";
 import { RoiGroupStore, roiGroupStoreChanged } from "./gcs_client.js";
 import type { RoiGroupSummary } from "./schema.js";
 import { makeRoiGroupDocument } from "./schema.js";
+import type { FilterController } from "../filter/controller.js";
+import {
+  button,
+  clear,
+  field,
+  h,
+  section,
+  select,
+  setStatus,
+} from "../ui/dom.js";
 
 const CONFIG_KEY = "ngpy_roi_store_config_v1";
 
-export function loadStoreConfig(param: string | null): RoiStoreConfig | undefined {
+export function loadStoreConfig(
+  param: string | null,
+): RoiStoreConfig | undefined {
   const parse = (text: string | null) => {
     if (!text) return undefined;
     try {
       const c = JSON.parse(text);
-      return typeof c?.bucket === "string" && c.bucket ? (c as RoiStoreConfig) : undefined;
+      return typeof c?.bucket === "string" && c.bucket
+        ? (c as RoiStoreConfig)
+        : undefined;
     } catch {
       return undefined;
     }
@@ -109,11 +121,27 @@ export class StorePanel {
   render() {
     clear(this.element);
     const c = this.config;
-    const bucket = h("input", { type: "text", value: c?.bucket ?? "", placeholder: "bucket name" });
-    const endpoint = h("input", { type: "text", value: c?.endpoint ?? "", placeholder: "https://storage.googleapis.com" });
+    const bucket = h("input", {
+      type: "text",
+      value: c?.bucket ?? "",
+      placeholder: "bucket name",
+    });
+    const endpoint = h("input", {
+      type: "text",
+      value: c?.endpoint ?? "",
+      placeholder: "https://storage.googleapis.com",
+    });
     let provider = c?.provider ?? "google";
-    const clientId = h("input", { type: "text", value: c?.clientId ?? "", placeholder: "OAuth client id" });
-    const authServer = h("input", { type: "text", value: c?.authServer ?? "", placeholder: "https://global.daf-apis.com" });
+    const clientId = h("input", {
+      type: "text",
+      value: c?.clientId ?? "",
+      placeholder: "OAuth client id",
+    });
+    const authServer = h("input", {
+      type: "text",
+      value: c?.authServer ?? "",
+      placeholder: "https://global.daf-apis.com",
+    });
     this.element.append(
       section(
         "Bucket",
@@ -130,7 +158,11 @@ export class StorePanel {
             (v) => (provider = v as any),
           ),
         ),
-        field("OAuth client id", clientId, `Register ${redirectUri()} as an authorised redirect URI.`),
+        field(
+          "OAuth client id",
+          clientId,
+          `Register ${redirectUri()} as an authorised redirect URI.`,
+        ),
         field("middleauth server", authServer),
         h(
           "div",
@@ -155,9 +187,14 @@ export class StorePanel {
           }),
           this.auth
             ? this.auth.signedIn
-              ? button(`Sign out${this.auth.email ? ` (${this.auth.email})` : ""}`, () => this.auth!.signOut())
+              ? button(
+                  `Sign out${this.auth.email ? ` (${this.auth.email})` : ""}`,
+                  () => this.auth!.signOut(),
+                )
               : button("Sign in", () =>
-                  this.auth!.signIn().catch((e) => setStatus(this.status, (e as Error).message, "error")),
+                  this.auth!.signIn().catch((e) =>
+                    setStatus(this.status, (e as Error).message, "error"),
+                  ),
                 )
             : null,
         ),
@@ -165,13 +202,25 @@ export class StorePanel {
     );
     if (this.store === undefined) {
       this.element.append(
-        h("p", { class: "ngpy-hint" }, "Not configured. Set a bucket above or pass ?roiStore={\"bucket\":…} in the page URL."),
+        h(
+          "p",
+          { class: "ngpy-hint" },
+          'Not configured. Set a bucket above or pass ?roiStore={"bucket":…} in the page URL.',
+        ),
         this.status,
       );
       return;
     }
     this.element.append(
-      section("Saved groups", h("div", { class: "ngpy-row" }, button("Refresh", () => void this.refresh())), this.listEl),
+      section(
+        "Saved groups",
+        h(
+          "div",
+          { class: "ngpy-row" },
+          button("Refresh", () => void this.refresh()),
+        ),
+        this.listEl,
+      ),
       this.saveSection,
       this.status,
     );
@@ -183,7 +232,10 @@ export class StorePanel {
     clear(this.listEl);
     const source = this.controller.sourceUrl();
     for (const s of this.summaries) {
-      const mismatch = source !== undefined && s.sourceUrl !== undefined && s.sourceUrl !== source;
+      const mismatch =
+        source !== undefined &&
+        s.sourceUrl !== undefined &&
+        s.sourceUrl !== source;
       this.listEl.append(
         h(
           "div",
@@ -192,14 +244,23 @@ export class StorePanel {
           h(
             "span",
             { class: "ngpy-hint" },
-            [s.createdBy, s.updated?.slice(0, 10), mismatch ? "drawn on another store" : ""].filter(Boolean).join(" · "),
+            [
+              s.createdBy,
+              s.updated?.slice(0, 10),
+              mismatch ? "drawn on another store" : "",
+            ]
+              .filter(Boolean)
+              .join(" · "),
           ),
           button("Import", () => void this.importDoc(s.id)),
           button("Delete", () => void this.deleteDoc(s)),
         ),
       );
     }
-    if (this.summaries.length === 0) this.listEl.append(h("div", { class: "ngpy-hint" }, "No saved groups listed."));
+    if (this.summaries.length === 0)
+      this.listEl.append(
+        h("div", { class: "ngpy-hint" }, "No saved groups listed."),
+      );
   }
 
   private renderSave() {
@@ -265,20 +326,32 @@ export class StorePanel {
       const doc = makeRoiGroupDocument({
         group,
         source: { url: source },
-        scene: { url: this.pageUrlForScene(), layerName: this.controller.model.settings.targetLayer },
+        scene: {
+          url: this.pageUrlForScene(),
+          layerName: this.controller.model.settings.targetLayer,
+        },
         createdBy: this.auth?.email,
       });
       setStatus(this.status, "Saving…", "busy");
       await this.store!.save(doc);
-      setStatus(this.status, `Saved “${group.name}” as groups/${doc.id}.json.`, "ok");
+      setStatus(
+        this.status,
+        `Saved “${group.name}” as groups/${doc.id}.json.`,
+        "ok",
+      );
     } catch (e) {
       setStatus(this.status, `Save failed: ${(e as Error).message}`, "error");
     }
   }
 
   /** Used by the Export tab's "Save to GCS". */
-  async uploadExport(fileName: string, blob: Blob, contentType: string): Promise<string> {
-    if (this.store === undefined) throw new Error("The ROI store is not configured");
+  async uploadExport(
+    fileName: string,
+    blob: Blob,
+    contentType: string,
+  ): Promise<string> {
+    if (this.store === undefined)
+      throw new Error("The ROI store is not configured");
     return this.store.putObject(`exports/${fileName}`, blob, contentType);
   }
 }

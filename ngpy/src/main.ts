@@ -16,7 +16,16 @@
 
 /** @file ngpy.html entry point. */
 
-import { BUILD_INFO, DEMO_SCRIPT, PAYLOAD_BASE64, WORKER_SOURCE } from "ngpy:embedded";
+// `ngpy:embedded` is a virtual module supplied by ngpy/build.ts (typed in
+// embedded.d.ts); there is no file for the import resolver to find.
+/* eslint-disable import/no-unresolved */
+import {
+  BUILD_INFO,
+  DEMO_SCRIPT,
+  PAYLOAD_BASE64,
+  WORKER_SOURCE,
+} from "ngpy:embedded";
+/* eslint-enable import/no-unresolved */
 import { App } from "./app.js";
 import { parseParams } from "./params.js";
 import { handleOAuthRedirect } from "./store/auth.js";

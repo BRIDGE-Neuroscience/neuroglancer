@@ -91,9 +91,7 @@ async def export_async(
         ids = union_ids(per_group)
         considered = int(ids.size)
         if ids.size:
-            found, streamlines = await store.polylines(
-                job.level, [int(i) for i in ids]
-            )
+            found, streamlines = await store.polylines(job.level, [int(i) for i in ids])
             ids = np.asarray(found, dtype=np.uint64)
         else:
             streamlines = []

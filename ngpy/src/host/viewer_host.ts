@@ -26,7 +26,10 @@
 
 import { Signal, stringifyState } from "../util/signal.js";
 
-export function isSameOrigin(url: string, base: string = window.location.href): boolean {
+export function isSameOrigin(
+  url: string,
+  base: string = window.location.href,
+): boolean {
   try {
     return new URL(url, base).origin === new URL(base).origin;
   } catch {

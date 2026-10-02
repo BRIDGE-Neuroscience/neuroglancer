@@ -54,7 +54,9 @@ export interface SetStateReply {
   g?: string;
 }
 
-export type SetStateTransport = (msg: SetStateMessage) => Promise<SetStateReply>;
+export type SetStateTransport = (
+  msg: SetStateMessage,
+) => Promise<SetStateReply>;
 
 export function randomClientId(): string {
   const bytes = new Uint8Array(8);

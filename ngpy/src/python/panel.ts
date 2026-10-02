@@ -36,7 +36,11 @@ export class PythonPanel {
   private console = h("pre", { class: "ngpy-console" });
   private status = h("div", { class: "ngpy-status" });
   private runButton: HTMLButtonElement;
-  private fileInput = h("input", { type: "file", accept: ".py,text/x-python,text/plain", style: { display: "none" } });
+  private fileInput = h("input", {
+    type: "file",
+    accept: ".py,text/x-python,text/plain",
+    style: { display: "none" },
+  });
   private trusted = false;
 
   constructor(
@@ -44,7 +48,10 @@ export class PythonPanel {
     private beforeRun: () => Promise<void>,
     private demoScript: string,
   ) {
-    this.runButton = button("Run ▶", () => void this.run(), { class: "ngpy-primary", title: "Ctrl+Enter" });
+    this.runButton = button("Run ▶", () => void this.run(), {
+      class: "ngpy-primary",
+      title: "Ctrl+Enter",
+    });
     this.editor.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
@@ -52,7 +59,12 @@ export class PythonPanel {
       }
       if (e.key === "Tab") {
         e.preventDefault();
-        this.editor.setRangeText("    ", this.editor.selectionStart, this.editor.selectionEnd, "end");
+        this.editor.setRangeText(
+          "    ",
+          this.editor.selectionStart,
+          this.editor.selectionEnd,
+          "end",
+        );
       }
     });
     this.editor.addEventListener("input", () => (this.trusted = false));
@@ -130,7 +142,8 @@ export class PythonPanel {
     try {
       await this.beforeRun();
       const result = await this.python.run(code, "<ngpy-script>");
-      if (result !== undefined && result !== null && result !== "") this.print(`${result}\n`);
+      if (result !== undefined && result !== null && result !== "")
+        this.print(`${result}\n`);
       this.print(">>> done\n", "info");
     } catch (e) {
       this.print(`${(e as Error).message}\n`, "stderr");

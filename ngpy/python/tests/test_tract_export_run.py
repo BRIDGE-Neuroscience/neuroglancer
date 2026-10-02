@@ -72,7 +72,10 @@ class TestStorePathFromUrl:
             ("zarr3://gs://b/x.zvf", "gs://b/x.zvf"),
             ("/data/tracts.zvf", "/data/tracts.zvf"),
             ("gs://b/x.zvf", "gs://b/x.zvf"),
-            ("https://h/b/store.zarrvectors/|zarr-vectors:", "https://h/b/store.zarrvectors/"),
+            (
+                "https://h/b/store.zarrvectors/|zarr-vectors:",
+                "https://h/b/store.zarrvectors/",
+            ),
             ("https://h/b/store/|zarr-vectors:foo=1", "https://h/b/store/"),
         ],
     )
@@ -119,7 +122,9 @@ class TestPassingObjectIds:
         )
 
     def test_include_selects_crossing_objects(self):
-        ids = passing_object_ids(self._index(), job_with([sphere((0, 0, 0), 2)]).groups[0])
+        ids = passing_object_ids(
+            self._index(), job_with([sphere((0, 0, 0), 2)]).groups[0]
+        )
         assert ids.tolist() == [1, 3]
 
     def test_leading_exclusion_selects_the_complement(self):
@@ -178,7 +183,9 @@ class TestExplicitObjectIds:
         return parse_job(s)
 
     def test_per_group_from_object_ids_dedups_and_sorts(self):
-        job = self._job([{"name": "A", "color": "#ff0000", "objectIds": ["5", "5", "3"]}])
+        job = self._job(
+            [{"name": "A", "color": "#ff0000", "objectIds": ["5", "5", "3"]}]
+        )
         per_group = per_group_from_object_ids(job.groups)
         assert per_group[0][1].tolist() == [3, 5]
         assert uses_explicit_ids(job.groups)

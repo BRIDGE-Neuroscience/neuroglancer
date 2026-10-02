@@ -32,9 +32,9 @@
  * documents all read -- one serialisation for all three.
  */
 
-import { Signal } from "../util/signal.js";
 import type { DimensionScales, RoiShapeJson } from "./roi_geometry.js";
 import { annotationToShape } from "./roi_geometry.js";
+import { Signal } from "../util/signal.js";
 
 export type RoiOperator = "and" | "or" | "andnot";
 export type RoiPredicate =
@@ -139,7 +139,8 @@ export class FilterModel {
     const group: Group = {
       id: this.nextId++,
       name: init.name ?? `Group ${this.groups.length + 1}`,
-      color: init.color ?? GROUP_PALETTE[this.groups.length % GROUP_PALETTE.length],
+      color:
+        init.color ?? GROUP_PALETTE[this.groups.length % GROUP_PALETTE.length],
       visible: init.visible ?? true,
       opacity: init.opacity ?? 1,
       rois: init.rois ?? [],
@@ -244,7 +245,10 @@ export class FilterModel {
 
   commitPreview(name?: string): Group | undefined {
     const p = this.preview;
-    if (p === undefined || (p.rois.length === 0 && p.attrFilters.length === 0)) {
+    if (
+      p === undefined ||
+      (p.rois.length === 0 && p.attrFilters.length === 0)
+    ) {
       return undefined;
     }
     this.preview = undefined;
@@ -272,7 +276,11 @@ export class FilterModel {
         shape = annotationToShape(ann, scales);
         if (shape === undefined) continue;
       }
-      const entry: any = { shape, predicate: roi.predicate, operator: roi.operator };
+      const entry: any = {
+        shape,
+        predicate: roi.predicate,
+        operator: roi.operator,
+      };
       if (roi.name) entry.name = roi.name;
       rois.push(entry);
     }
@@ -313,7 +321,10 @@ export class FilterModel {
   toJSON(): any {
     return {
       settings: { ...this.settings },
-      groups: this.groups.map((g) => ({ ...g, rois: g.rois.map((r) => ({ ...r })) })),
+      groups: this.groups.map((g) => ({
+        ...g,
+        rois: g.rois.map((r) => ({ ...r })),
+      })),
       activeGroupId: this.activeGroupId,
     };
   }
@@ -323,7 +334,7 @@ export class FilterModel {
     this.settings = {
       ghostAlpha: DEFAULT_GHOST_ALPHA,
       colorByGroup: true,
-      ...(json.settings ?? {}),
+      ...json.settings,
     };
     this.groups = Array.isArray(json.groups)
       ? json.groups.map((g: any) => ({

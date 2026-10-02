@@ -91,7 +91,9 @@ describe("buildJobSpec", () => {
 describe("affine and file names", () => {
   it("parses 16 numbers, blank as identity, and rejects the rest", () => {
     expect(parseAffineText("")).toBeUndefined();
-    expect(parseAffineText("1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1")).toEqual(defaultAffine(1e-3));
+    expect(parseAffineText("1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1")).toEqual(
+      defaultAffine(1e-3),
+    );
     expect(() => parseAffineText("1 2 3")).toThrow();
   });
 

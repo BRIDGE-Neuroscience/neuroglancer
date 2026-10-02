@@ -21,12 +21,20 @@
  * `background_color_by_controls` against the wrapper's own model.
  */
 
-import { setSkeletonShader } from "../host/viewer_api.js";
-import { button, clear, field, h, section, select, setStatus } from "../ui/dom.js";
 import { colorPresets } from "./colorby.js";
 import type { FilterController } from "./controller.js";
 import type { AttrFilter, Group, GroupRoi, LabelRoi } from "./model.js";
 import { OPERATORS, PREDICATES } from "./model.js";
+import { setSkeletonShader } from "../host/viewer_api.js";
+import {
+  button,
+  clear,
+  field,
+  h,
+  section,
+  select,
+  setStatus,
+} from "../ui/dom.js";
 
 type LabelState = "include" | "exclude";
 
@@ -61,9 +69,13 @@ export class FilterPanel {
       if (
         active instanceof HTMLInputElement &&
         this.element.contains(active) &&
-        (active.type === "text" || active.type === "number" || active.type === "search")
+        (active.type === "text" ||
+          active.type === "number" ||
+          active.type === "search")
       ) {
-        active.addEventListener("blur", () => this.queueRender(), { once: true });
+        active.addEventListener("blur", () => this.queueRender(), {
+          once: true,
+        });
         return;
       }
       this.render();
@@ -80,7 +92,10 @@ export class FilterPanel {
     // --- target -----------------------------------------------------------
     const candidates = c.targetCandidates();
     const target = select(
-      [{ value: "", label: "— choose a zarr-vectors layer —" }, ...candidates.map((n) => ({ value: n, label: n }))],
+      [
+        { value: "", label: "— choose a zarr-vectors layer —" },
+        ...candidates.map((n) => ({ value: n, label: n })),
+      ],
       m.settings.targetLayer ?? "",
       (v) => {
         m.settings.targetLayer = v || undefined;
@@ -91,7 +106,10 @@ export class FilterPanel {
     );
     const info = c.storeInfo;
     const levelOptions = [
-      { value: "auto", label: `auto${info ? ` (level ${info.defaultLevel})` : ""}` },
+      {
+        value: "auto",
+        label: `auto${info ? ` (level ${info.defaultLevel})` : ""}`,
+      },
       ...(info?.levels ?? []).map((l) => ({
         value: String(l.level),
         label: `${l.level}: ${l.vertexCount.toLocaleString()} vertices`,
@@ -108,7 +126,13 @@ export class FilterPanel {
     this.body.append(
       section(
         "Target",
-        field("Layer", target, candidates.length === 0 ? "No segmentation layer with a zarr-vectors source." : undefined),
+        field(
+          "Layer",
+          target,
+          candidates.length === 0
+            ? "No segmentation layer with a zarr-vectors source."
+            : undefined,
+        ),
         field(
           "Evaluate at level",
           level,
@@ -127,7 +151,10 @@ export class FilterPanel {
     // --- ROI layer ---------------------------------------------------------
     const annLayers = c.annotationLayers();
     const roiSelect = select(
-      [{ value: "", label: "— none —" }, ...annLayers.map((n) => ({ value: n, label: n }))],
+      [
+        { value: "", label: "— none —" },
+        ...annLayers.map((n) => ({ value: n, label: n })),
+      ],
       m.settings.roiLayer ?? "",
       (v) => {
         m.settings.roiLayer = v || undefined;
@@ -142,7 +169,8 @@ export class FilterPanel {
           "div",
           { class: "ngpy-row" },
           button("Create ROI layer", () => c.createRoiLayer(), {
-            title: "Adds a local annotation layer (reloads the layer list once)",
+            title:
+              "Adds a local annotation layer (reloads the layer list once)",
           }),
         ),
         h(
@@ -155,8 +183,11 @@ export class FilterPanel {
 
     // --- groups --------------------------------------------------------------
     const groupsEl = section("Groups");
-    const counts = new Map((c.lastResult?.groups ?? []).map((g) => [g.id, g.count]));
-    for (const g of m.groups) groupsEl.append(this.renderGroup(g, counts.get(g.id)));
+    const counts = new Map(
+      (c.lastResult?.groups ?? []).map((g) => [g.id, g.count]),
+    );
+    for (const g of m.groups)
+      groupsEl.append(this.renderGroup(g, counts.get(g.id)));
     groupsEl.append(
       h(
         "div",
@@ -171,7 +202,9 @@ export class FilterPanel {
             step: "0.05",
             value: String(m.settings.ghostAlpha),
             onchange: (e: Event) => {
-              m.settings.ghostAlpha = Number((e.target as HTMLInputElement).value);
+              m.settings.ghostAlpha = Number(
+                (e.target as HTMLInputElement).value,
+              );
               m.dispatch();
             },
           }),
@@ -216,13 +249,15 @@ export class FilterPanel {
       h("input", {
         type: "color",
         value: g.color,
-        onchange: (e: Event) => m.updateGroup(g.id, { color: (e.target as HTMLInputElement).value }),
+        onchange: (e: Event) =>
+          m.updateGroup(g.id, { color: (e.target as HTMLInputElement).value }),
       }),
       h("input", {
         type: "text",
         class: "ngpy-group-name",
         value: g.name,
-        onchange: (e: Event) => m.updateGroup(g.id, { name: (e.target as HTMLInputElement).value }),
+        onchange: (e: Event) =>
+          m.updateGroup(g.id, { name: (e.target as HTMLInputElement).value }),
       }),
       h(
         "label",
@@ -231,19 +266,33 @@ export class FilterPanel {
           type: "checkbox",
           checked: g.visible,
           onchange: (e: Event) =>
-            m.updateGroup(g.id, { visible: (e.target as HTMLInputElement).checked }),
+            m.updateGroup(g.id, {
+              visible: (e.target as HTMLInputElement).checked,
+            }),
         }),
         "visible",
       ),
-      h("span", { class: "ngpy-badge" }, count === undefined ? "–" : count.toLocaleString()),
-      button("↑", () => m.moveGroup(g.id, -1), { title: "Move up (first group wins the colour)" }),
+      h(
+        "span",
+        { class: "ngpy-badge" },
+        count === undefined ? "–" : count.toLocaleString(),
+      ),
+      button("↑", () => m.moveGroup(g.id, -1), {
+        title: "Move up (first group wins the colour)",
+      }),
       button("↓", () => m.moveGroup(g.id, 1)),
       button("✕", () => m.removeGroup(g.id), { title: "Delete group" }),
     );
     const list = h("div", { class: "ngpy-roi-list" });
     g.rois.forEach((roi, i) => list.append(this.renderRoi(g, roi, i)));
     if (g.rois.length === 0 && g.attrFilters.length === 0) {
-      list.append(h("div", { class: "ngpy-hint" }, "No regions yet: draw one in the ROI layer."));
+      list.append(
+        h(
+          "div",
+          { class: "ngpy-hint" },
+          "No regions yet: draw one in the ROI layer.",
+        ),
+      );
     }
     g.attrFilters.forEach((f, i) =>
       list.append(
@@ -259,7 +308,12 @@ export class FilterPanel {
         ),
       ),
     );
-    return h("div", { class: `ngpy-group${active ? " active" : ""}` }, header, list);
+    return h(
+      "div",
+      { class: `ngpy-group${active ? " active" : ""}` },
+      header,
+      list,
+    );
   }
 
   private renderRoi(g: Group, roi: GroupRoi, index: number): HTMLElement {
@@ -271,7 +325,11 @@ export class FilterPanel {
     return h(
       "div",
       { class: "ngpy-roi" },
-      h("span", { class: "ngpy-roi-kind" }, roi.kind === "labels" ? "label" : "shape"),
+      h(
+        "span",
+        { class: "ngpy-roi-kind" },
+        roi.kind === "labels" ? "label" : "shape",
+      ),
       h("span", { class: "ngpy-roi-name" }, label),
       select(OPERATORS, roi.operator, (v) => {
         roi.operator = v as any;
@@ -281,20 +339,34 @@ export class FilterPanel {
         roi.predicate = v as any;
         m.dispatch();
       }),
-      button("↑", () => m.moveRoi(g.id, index, -1), { title: "Earlier in the fold" }),
-      button("✕", () => {
-        g.rois.splice(index, 1);
-        m.dispatch();
-      }, { title: "Remove from group (the annotation stays; delete it in the viewer)" }),
+      button("↑", () => m.moveRoi(g.id, index, -1), {
+        title: "Earlier in the fold",
+      }),
+      button(
+        "✕",
+        () => {
+          g.rois.splice(index, 1);
+          m.dispatch();
+        },
+        {
+          title:
+            "Remove from group (the annotation stays; delete it in the viewer)",
+        },
+      ),
     );
   }
 
   private renderLabels(): HTMLElement {
     const c = this.controller;
     const m = c.model;
-    const layers = c.segmentationLayers().filter((n) => n !== m.settings.targetLayer);
+    const layers = c
+      .segmentationLayers()
+      .filter((n) => n !== m.settings.targetLayer);
     const parcel = select(
-      [{ value: "", label: "— none —" }, ...layers.map((n) => ({ value: n, label: n }))],
+      [
+        { value: "", label: "— none —" },
+        ...layers.map((n) => ({ value: n, label: n })),
+      ],
       m.settings.parcellationLayer ?? "",
       (v) => {
         m.settings.parcellationLayer = v || undefined;
@@ -306,10 +378,14 @@ export class FilterPanel {
     const out = section(
       "By segmentation label",
       field("Parcellation layer", parcel),
-      button("Reload labels", () => void c.loadLabels().then(() => this.queueRender())),
+      button(
+        "Reload labels",
+        () => void c.loadLabels().then(() => this.queueRender()),
+      ),
     );
     const info = c.labelInfo;
-    if (info === undefined || m.settings.parcellationLayer === undefined) return out;
+    if (info === undefined || m.settings.parcellationLayer === undefined)
+      return out;
     const search = h("input", {
       type: "search",
       placeholder: "search labels",
@@ -324,11 +400,16 @@ export class FilterPanel {
       clear(listEl);
       const q = this.labelSearch.toLowerCase();
       for (const l of info.labels) {
-        if (q && !l.name.toLowerCase().includes(q) && !String(l.id).includes(q)) continue;
+        if (q && !l.name.toLowerCase().includes(q) && !String(l.id).includes(q))
+          continue;
         const state = this.labelState.get(l.id);
         const cycle = () => {
           const next: LabelState | undefined =
-            state === undefined ? "include" : state === "include" ? "exclude" : undefined;
+            state === undefined
+              ? "include"
+              : state === "include"
+                ? "exclude"
+                : undefined;
           if (next === undefined) this.labelState.delete(l.id);
           else this.labelState.set(l.id, next);
           this.updateLabelPreview();
@@ -337,8 +418,15 @@ export class FilterPanel {
         listEl.append(
           h(
             "div",
-            { class: `ngpy-label ${state ?? ""}`, onclick: cycle, title: "click: include → exclude → off" },
-            h("span", { class: "ngpy-swatch", style: { background: l.color ?? "#888" } }),
+            {
+              class: `ngpy-label ${state ?? ""}`,
+              onclick: cycle,
+              title: "click: include → exclude → off",
+            },
+            h("span", {
+              class: "ngpy-swatch",
+              style: { background: l.color ?? "#888" },
+            }),
             h("span", {}, `${l.name}`),
             h("span", { class: "ngpy-hint" }, ` ${l.id}`),
             h("span", { class: "ngpy-label-state" }, state ?? ""),
@@ -361,30 +449,60 @@ export class FilterPanel {
         button("Create group from selection", () => {
           const names = [...this.labelState.entries()]
             .filter(([, s]) => s === "include")
-            .map(([id]) => info.labels.find((l) => l.id === id)?.name ?? String(id));
-          m.commitPreview(names.length ? names.slice(0, 3).join(" + ") : "Labels");
+            .map(
+              ([id]) =>
+                info.labels.find((l) => l.id === id)?.name ?? String(id),
+            );
+          m.commitPreview(
+            names.length ? names.slice(0, 3).join(" + ") : "Labels",
+          );
           this.labelState.clear();
         }),
       ),
-      h("p", { class: "ngpy-hint" }, "Passes tracts crossing ANY included label and NO excluded one. The selection previews live in white."),
+      h(
+        "p",
+        { class: "ngpy-hint" },
+        "Passes tracts crossing ANY included label and NO excluded one. The selection previews live in white.",
+      ),
     );
     return out;
   }
 
   private updateLabelPreview() {
     const m = this.controller.model;
-    const include = [...this.labelState].filter(([, s]) => s === "include").map(([id]) => id);
-    const exclude = [...this.labelState].filter(([, s]) => s === "exclude").map(([id]) => id);
+    const include = [...this.labelState]
+      .filter(([, s]) => s === "include")
+      .map(([id]) => id);
+    const exclude = [...this.labelState]
+      .filter(([, s]) => s === "exclude")
+      .map(([id]) => id);
     const rois: LabelRoi[] = [];
     if (include.length) {
-      rois.push({ kind: "labels", labels: include, operator: "and", predicate: "any_vertex" });
+      rois.push({
+        kind: "labels",
+        labels: include,
+        operator: "and",
+        predicate: "any_vertex",
+      });
     }
     if (exclude.length) {
-      rois.push({ kind: "labels", labels: exclude, operator: "andnot", predicate: "any_vertex" });
+      rois.push({
+        kind: "labels",
+        labels: exclude,
+        operator: "andnot",
+        predicate: "any_vertex",
+      });
     }
     m.setPreview(
       rois.length
-        ? { name: "Label selection", color: "#ffffff", visible: true, opacity: 1, rois, attrFilters: [] }
+        ? {
+            name: "Label selection",
+            color: "#ffffff",
+            visible: true,
+            opacity: 1,
+            rois,
+            attrFilters: [],
+          }
         : undefined,
     );
   }
@@ -404,20 +522,35 @@ export class FilterPanel {
       list: "ngpy-attr-names",
       value: draft.name,
       placeholder: "object attribute",
-      onchange: (e: Event) => (draft.name = (e.target as HTMLInputElement).value),
+      onchange: (e: Event) =>
+        (draft.name = (e.target as HTMLInputElement).value),
     });
-    const dl = h("datalist", { id: "ngpy-attr-names" }, names.map((n) => h("option", { value: n })));
+    const dl = h(
+      "datalist",
+      { id: "ngpy-attr-names" },
+      names.map((n) => h("option", { value: n })),
+    );
     const num = (key: "min" | "max") =>
       h("input", {
         type: "number",
         step: "any",
         value: String(draft[key]),
         class: "ngpy-num",
-        onchange: (e: Event) => (draft[key] = Number((e.target as HTMLInputElement).value)),
+        onchange: (e: Event) =>
+          (draft[key] = Number((e.target as HTMLInputElement).value)),
       });
     return section(
       "By attribute",
-      h("div", { class: "ngpy-row" }, nameInput, dl, "min", num("min"), "max", num("max")),
+      h(
+        "div",
+        { class: "ngpy-row" },
+        nameInput,
+        dl,
+        "min",
+        num("min"),
+        "max",
+        num("max"),
+      ),
       h(
         "div",
         { class: "ngpy-row" },
@@ -438,7 +571,10 @@ export class FilterPanel {
         }),
         button("Create group", () => {
           m.setPreview(undefined);
-          m.addGroup({ name: `${draft.name} ∈ [${draft.min}, ${draft.max}]`, attrFilters: [{ ...draft }] });
+          m.addGroup({
+            name: `${draft.name} ∈ [${draft.min}, ${draft.max}]`,
+            attrFilters: [{ ...draft }],
+          });
         }),
         button("Clear preview", () => m.setPreview(undefined)),
       ),
@@ -461,7 +597,10 @@ export class FilterPanel {
     }));
     const presets = colorPresets(attrs);
     const s = select(
-      [{ value: "", label: "— choose —" }, ...presets.map((p) => ({ value: p.id, label: p.label }))],
+      [
+        { value: "", label: "— choose —" },
+        ...presets.map((p) => ({ value: p.id, label: p.label })),
+      ],
       "",
       (v) => {
         const p = presets.find((x) => x.id === v);
@@ -471,7 +610,11 @@ export class FilterPanel {
     );
     return section(
       "Colour by",
-      field("Skeleton shader", s, "Writes skeletonRendering.shader on the target layer. Group colours only show with “Segment / group colour”."),
+      field(
+        "Skeleton shader",
+        s,
+        "Writes skeletonRendering.shader on the target layer. Group colours only show with “Segment / group colour”.",
+      ),
     );
   }
 }

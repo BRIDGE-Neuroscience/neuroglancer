@@ -26,9 +26,10 @@ import pytest
 zarr = pytest.importorskip("zarr")
 polylines_mod = pytest.importorskip("zarr_vectors.types.polylines")
 
-from ngpy import labels, zv  # noqa: E402
 from ngpy.filter import FilterEngine  # noqa: E402
 from ngpy.tractography import zvf_pure  # noqa: E402
+
+from ngpy import labels, zv  # noqa: E402
 
 write_polylines = polylines_mod.write_polylines
 
@@ -146,7 +147,9 @@ class TestStoreReads:
         s = zv.ZvStore(zv.http_base(store), zv.local_fetch, None)
 
         async def go():
-            return await read_async(polylines_mod.read_polylines, await s.root(), level=0)
+            return await read_async(
+                polylines_mod.read_polylines, await s.root(), level=0
+            )
 
         with pytest.raises(StoreError, match="list"):
             run(go())
@@ -167,7 +170,9 @@ class TestStoreReads:
         np.testing.assert_allclose(lines[0], TRACTS[2])
 
     def test_store_info_with_and_without_listing(self, store):
-        listed = zv.ZvStore(zv.http_base(store), zv.local_fetch, zv.make_lister(zv.local_fetch))
+        listed = zv.ZvStore(
+            zv.http_base(store), zv.local_fetch, zv.make_lister(zv.local_fetch)
+        )
         info = run(listed.info())
         assert [lv.level for lv in info.levels] == [0]
         assert info.levels[0].vertex_count == sum(len(t) for t in TRACTS)
@@ -202,7 +207,14 @@ class TestEngine:
     def test_box_include_writes_segments_and_group_colour(self, store):
         r = evaluate(
             store,
-            [{"id": 1, "name": "g", "color": "#ff0000", "rois": [box([10, 0, 0], [20, 10, 10])]}],
+            [
+                {
+                    "id": 1,
+                    "name": "g",
+                    "color": "#ff0000",
+                    "rois": [box([10, 0, 0], [20, 10, 10])],
+                }
+            ],
         )
         assert r["active"] is True
         assert r["segments"] == ["0"]
@@ -213,16 +225,21 @@ class TestEngine:
         # Tract 2 has vertices at y=1, 20, 39: a thin box at y=10 sits between.
         thin = [30, 9, 30], [40, 11, 40]
         seg = evaluate(store, [{"color": "#fff", "rois": [box(*thin)]}])
-        vtx = evaluate(store, [{"color": "#fff", "rois": [box(*thin, predicate="any_vertex")]}])
+        vtx = evaluate(
+            store, [{"color": "#fff", "rois": [box(*thin, predicate="any_vertex")]}]
+        )
         assert seg["segments"] == ["2"] and vtx["segments"] == []
 
     def test_exclusion_only_group_selects_the_complement(self, store):
         r = evaluate(
-            store, [{"color": "#00ff00", "rois": [box([0, 0, 0], [10, 10, 10], op="andnot")]}]
+            store,
+            [{"color": "#00ff00", "rois": [box([0, 0, 0], [10, 10, 10], op="andnot")]}],
         )
         assert r["segments"] == ["1", "2", "3"]
 
-    def test_first_visible_group_wins_the_colour_and_invisible_groups_do_nothing(self, store):
+    def test_first_visible_group_wins_the_colour_and_invisible_groups_do_nothing(
+        self, store
+    ):
         everything = box([0, 0, 0], [40, 40, 40])
         r = evaluate(
             store,
@@ -233,11 +250,24 @@ class TestEngine:
             ],
         )
         assert r["segments"] == ["0", "1", "2", "3"]
-        assert r["colors"] == {"0": "#333333", "1": "#222222", "2": "#333333", "3": "#333333"}
+        assert r["colors"] == {
+            "0": "#333333",
+            "1": "#222222",
+            "2": "#333333",
+            "3": "#333333",
+        }
         assert [g["count"] for g in r["groups"]] == [4, 1, 4]
 
     def test_attribute_only_group_and_attribute_and_roi(self, store):
-        r = evaluate(store, [{"color": "#fff", "attrFilters": [{"name": "length", "min": 5, "max": 30}]}])
+        r = evaluate(
+            store,
+            [
+                {
+                    "color": "#fff",
+                    "attrFilters": [{"name": "length", "min": 5, "max": 30}],
+                }
+            ],
+        )
         assert r["segments"] == ["0", "1"]
         r = evaluate(
             store,
@@ -258,15 +288,32 @@ class TestEngine:
     def test_label_group_against_an_ome_zarr_parcellation(self, store, tmp_path):
         vol = _write_ome_labels(tmp_path)
         parc = {"url": f"{vol}/|zarr2:"}
-        include = {"shape": {"type": "labelMask", "labels": [7]}, "predicate": "any_vertex", "operator": "and"}
-        exclude = {"shape": {"type": "labelMask", "labels": [9]}, "predicate": "any_vertex", "operator": "andnot"}
-        r = evaluate(store, [{"color": "#abcdef", "rois": [include], "parcellation": parc}])
+        include = {
+            "shape": {"type": "labelMask", "labels": [7]},
+            "predicate": "any_vertex",
+            "operator": "and",
+        }
+        exclude = {
+            "shape": {"type": "labelMask", "labels": [9]},
+            "predicate": "any_vertex",
+            "operator": "andnot",
+        }
+        r = evaluate(
+            store, [{"color": "#abcdef", "rois": [include], "parcellation": parc}]
+        )
         assert r["segments"] == ["0", "3"]
-        r = evaluate(store, [{"color": "#abcdef", "rois": [include, exclude], "parcellation": parc}])
+        r = evaluate(
+            store,
+            [{"color": "#abcdef", "rois": [include, exclude], "parcellation": parc}],
+        )
         assert r["segments"] == ["3"]
 
     def test_label_group_without_parcellation_is_a_clear_error(self, store):
-        lm = {"shape": {"type": "labelMask", "labels": [1]}, "predicate": "any_vertex", "operator": "and"}
+        lm = {
+            "shape": {"type": "labelMask", "labels": [1]},
+            "predicate": "any_vertex",
+            "operator": "and",
+        }
         with pytest.raises(ValueError, match="parcellation"):
             evaluate(store, [{"color": "#fff", "rois": [lm]}])
 
@@ -275,11 +322,19 @@ class TestEngine:
             "source": store,
             "groups": [
                 {"name": "a", "color": "#fff", "rois": [box([0, 0, 0], [10, 10, 10])]},
-                {"name": "b", "color": "#fff", "visible": False, "rois": [box([30, 0, 30], [40, 40, 40])]},
+                {
+                    "name": "b",
+                    "color": "#fff",
+                    "visible": False,
+                    "rois": [box([30, 0, 30], [40, 40, 40])],
+                },
             ],
         }
         got = run(engine().passing_ids(request))
-        assert got == [{"name": "a", "objectIds": ["0"]}, {"name": "b", "objectIds": ["2"]}]
+        assert got == [
+            {"name": "a", "objectIds": ["0"]},
+            {"name": "b", "objectIds": ["2"]},
+        ]
 
 
 # -- ngpy.labels -------------------------------------------------------------------
@@ -297,8 +352,12 @@ def _write_ome_labels(tmp_path):
     data[:10, :10, :9] = 7
     data[:10, :10, :5] = 9
     arr = zarr.open_array(
-        store=os.path.join(path, "0"), mode="w", shape=data.shape, chunks=(8, 8, 8),
-        dtype="u2", zarr_format=2,
+        store=os.path.join(path, "0"),
+        mode="w",
+        shape=data.shape,
+        chunks=(8, 8, 8),
+        dtype="u2",
+        zarr_format=2,
     )
     arr[...] = data
     with open(os.path.join(path, ".zgroup"), "w") as f:
@@ -318,7 +377,10 @@ def _write_ome_labels(tmp_path):
                                 "path": "0",
                                 "coordinateTransformations": [
                                     {"type": "scale", "scale": [2000.0] * 3},
-                                    {"type": "translation", "translation": [1000.0] * 3},
+                                    {
+                                        "type": "translation",
+                                        "translation": [1000.0] * 3,
+                                    },
                                 ],
                             }
                         ],
@@ -336,7 +398,10 @@ class TestLabels:
             "zarr",
             "https://storage.googleapis.com/b/p.zarr/",
         )
-        assert labels.parse_volume_source("zarr3://https://h/v") == ("zarr", "https://h/v/")
+        assert labels.parse_volume_source("zarr3://https://h/v") == (
+            "zarr",
+            "https://h/v/",
+        )
         assert labels.parse_volume_source("precomputed://https://h/v") == (
             "precomputed",
             "https://h/v/",
@@ -345,7 +410,9 @@ class TestLabels:
             labels.parse_volume_source("https://h/unknown")
 
     def test_ome_zarr_sampling_matches_axes_by_name_and_units(self, tmp_path):
-        vol = run(labels.open_label_volume(_write_ome_labels(tmp_path), fetch=zv.local_fetch))
+        vol = run(
+            labels.open_label_volume(_write_ome_labels(tmp_path), fetch=zv.local_fetch)
+        )
         assert vol.axes == ["z", "y", "x"]
         np.testing.assert_allclose(vol.scale_m, [2e-3] * 3)
         # Points in x,y,z millimetres -> metres.
@@ -374,7 +441,9 @@ class TestLabels:
         block = np.zeros((2, 4, 4), dtype="<u4")  # z, y, x
         block[1, 2, 3] = 42
         (base / "s0" / "0-4_0-4_0-2").write_bytes(block.tobytes())
-        vol = run(labels.open_label_volume(f"precomputed://{base}", fetch=zv.local_fetch))
+        vol = run(
+            labels.open_label_volume(f"precomputed://{base}", fetch=zv.local_fetch)
+        )
         pts = np.array([[3.5, 2.5, 1.5], [0.5, 0.5, 0.5]]) * 1e-3
         assert list(vol.sample(pts, ["x", "y", "z"])) == [42, 0]
 
@@ -388,11 +457,17 @@ class TestLabels:
                     "inline": {
                         "ids": ["2", "41"],
                         "properties": [
-                            {"id": "label", "type": "label", "values": ["Left WM", "Right WM"]}
+                            {
+                                "id": "label",
+                                "type": "label",
+                                "values": ["Left WM", "Right WM"],
+                            }
                         ],
                     },
                 }
             )
         )
-        got = run(labels.read_segment_properties(f"precomputed://{d}", fetch=zv.local_fetch))
+        got = run(
+            labels.read_segment_properties(f"precomputed://{d}", fetch=zv.local_fetch)
+        )
         assert got["ids"] == ["2", "41"] and got["names"] == ["Left WM", "Right WM"]

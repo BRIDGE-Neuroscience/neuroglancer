@@ -64,7 +64,10 @@ export function buildJobSpec(o: ExportOptions): any {
           })),
     format: o.format,
     scope: o.scope,
-    destination: { kind: o.destination, path: exportFileName(o.fileName, o.format) },
+    destination: {
+      kind: o.destination,
+      path: exportFileName(o.fileName, o.format),
+    },
   };
   if (o.affine !== undefined) spec.affine = o.affine;
   return spec;
@@ -99,6 +102,9 @@ export function parseAffineText(text: string): number[][] | undefined {
 }
 
 export function exportFileName(base: string, format: ExportFormat): string {
-  const stem = (base.trim() || "dissection").replace(/(\.(trk|zvf|zip))+$/i, "");
+  const stem = (base.trim() || "dissection").replace(
+    /(\.(trk|zvf|zip))+$/i,
+    "",
+  );
   return format === "trk" ? `${stem}.trk` : `${stem}.zvf.zip`;
 }

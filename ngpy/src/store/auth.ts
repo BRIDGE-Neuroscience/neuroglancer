@@ -30,8 +30,8 @@
  *   localStorage key, so a same-origin hosted viewer sees the sign-in too.
  */
 
-import { Signal } from "../util/signal.js";
 import type { RoiStoreTokenSource } from "./gcs_client.js";
+import { Signal } from "../util/signal.js";
 
 export interface RoiStoreConfig {
   bucket: string;
@@ -140,7 +140,11 @@ function openPopup(url: string): Window {
   const h = 640;
   const left = Math.max(0, window.screenX + (window.outerWidth - w) / 2);
   const top = Math.max(0, window.screenY + (window.outerHeight - h) / 2);
-  const popup = window.open(url, "_blank", `width=${w},height=${h},left=${left},top=${top}`);
+  const popup = window.open(
+    url,
+    "_blank",
+    `width=${w},height=${h},left=${left},top=${top}`,
+  );
   if (popup === null) throw new Error("The sign-in popup was blocked");
   return popup;
 }
@@ -159,7 +163,10 @@ export class GoogleRoiStoreAuth implements RoiStoreAuth {
 
   constructor(private config: RoiStoreConfig) {
     const stored = readJson(GoogleRoiStoreAuth.KEY);
-    if (stored?.accessToken && stored.expiresAt - EXPIRY_MARGIN_MS > Date.now()) {
+    if (
+      stored?.accessToken &&
+      stored.expiresAt - EXPIRY_MARGIN_MS > Date.now()
+    ) {
       this.token = stored;
     }
   }
@@ -209,11 +216,17 @@ export class GoogleRoiStoreAuth implements RoiStoreAuth {
   private authenticate(): Promise<StoredToken> {
     const { clientId } = this.config;
     if (!clientId) {
-      return Promise.reject(new Error("No OAuth client id configured for the ROI store"));
+      return Promise.reject(
+        new Error("No OAuth client id configured for the ROI store"),
+      );
     }
     const state = randomState();
-    const scopes = this.config.scopes?.length ? this.config.scopes : DEFAULT_SCOPES;
-    const popup = openPopup(googleAuthorizeUrl(clientId, scopes, state, redirectUri()));
+    const scopes = this.config.scopes?.length
+      ? this.config.scopes
+      : DEFAULT_SCOPES;
+    const popup = openPopup(
+      googleAuthorizeUrl(clientId, scopes, state, redirectUri()),
+    );
     return new Promise<StoredToken>((resolve, reject) => {
       let channel: BroadcastChannel | undefined;
       const cleanup = () => {
@@ -233,9 +246,12 @@ export class GoogleRoiStoreAuth implements RoiStoreAuth {
           expiresAt: Date.now() + Number(params.expires_in ?? 3600) * 1000,
         };
         try {
-          const info = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
-            headers: { Authorization: `Bearer ${token.accessToken}` },
-          });
+          const info = await fetch(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            {
+              headers: { Authorization: `Bearer ${token.accessToken}` },
+            },
+          );
           if (info.ok) token.email = (await info.json()).email;
         } catch {
           // Email is provenance only.

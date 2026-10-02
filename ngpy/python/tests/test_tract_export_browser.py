@@ -24,7 +24,6 @@ Pyodide (see the browser check in the README).
 
 import asyncio
 import io
-import os
 import zipfile
 
 import numpy as np
@@ -35,9 +34,10 @@ polylines_mod = pytest.importorskip("zarr_vectors.types.polylines")
 pytest.importorskip("zarr_vectors.core.aio")
 nib = pytest.importorskip("nibabel")
 
-from ngpy import zv  # noqa: E402
 from ngpy.tract_export import parse_job  # noqa: E402
 from ngpy.tract_export.browser import export_async  # noqa: E402
+
+from ngpy import zv  # noqa: E402
 
 read_polylines = polylines_mod.read_polylines
 write_polylines = polylines_mod.write_polylines
@@ -294,8 +294,7 @@ class TestNoJspiReadPath:
 
         def no_jspi(*args, **kwargs):
             raise RuntimeError(
-                "WebAssembly stack switching not supported in this JavaScript "
-                "runtime"
+                "WebAssembly stack switching not supported in this JavaScript runtime"
             )
 
         monkeypatch.setattr(batch_reader, "flush_prefetch", no_jspi)

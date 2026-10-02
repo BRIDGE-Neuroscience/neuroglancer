@@ -20,6 +20,7 @@ import os
 import runpy
 
 import pytest
+
 from ngpy import api, bridge, zv
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,14 +43,20 @@ def test_demo_script_builds_the_scene_and_configures_the_gui():
     names = [layer["name"] for layer in state["layers"]]
     assert names == ["mni_t1", "mni_synthseg", "tracts", "ngpy ROIs"]
     tracts = state["layers"][2]
-    sources = tracts["source"] if isinstance(tracts["source"], list) else [tracts["source"]]
+    sources = (
+        tracts["source"] if isinstance(tracts["source"], list) else [tracts["source"]]
+    )
     urls = [x if isinstance(x, str) else x["url"] for x in sources]
     assert urls[0].endswith("|zarr-vectors:")
     assert tracts["skeletonRendering"]["mode2d"] == "lines"
     rois = state["layers"][3]
     assert rois["type"] == "annotation"
     assert [p["id"] for p in rois["annotationProperties"]] == ["color", "exclude"]
-    assert state["dimensions"] == {"x": [0.001, "m"], "y": [0.001, "m"], "z": [0.001, "m"]}
+    assert state["dimensions"] == {
+        "x": [0.001, "m"],
+        "y": [0.001, "m"],
+        "z": [0.001, "m"],
+    }
     gui = [m for k, m in messages if k == "gui"]
     assert gui[0] == {
         "filter": {
@@ -74,7 +81,11 @@ def test_label_info_classifies_a_layers_sources(tmp_path, monkeypatch):
                 "inline": {
                     "ids": ["7", "9", "11"],
                     "properties": [
-                        {"id": "label", "type": "label", "values": ["seven", "nine", "absent"]}
+                        {
+                            "id": "label",
+                            "type": "label",
+                            "values": ["seven", "nine", "absent"],
+                        }
                     ],
                 },
             }
@@ -86,10 +97,14 @@ def test_label_info_classifies_a_layers_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(labels, "default_fetch", lambda: zv.local_fetch)
     from ngpy import filter as filter_mod
 
-    monkeypatch.setattr(filter_mod, "_engine", filter_mod.FilterEngine(fetch=zv.local_fetch))
+    monkeypatch.setattr(
+        filter_mod, "_engine", filter_mod.FilterEngine(fetch=zv.local_fetch)
+    )
     out = json.loads(
         asyncio.run(
-            api.label_info(json.dumps({"sources": [f"{vol}/|zarr2:", f"precomputed://{props}"]}))
+            api.label_info(
+                json.dumps({"sources": [f"{vol}/|zarr2:", f"precomputed://{props}"]})
+            )
         )
     )
     assert out["volumeUrl"] == f"{vol}/|zarr2:"

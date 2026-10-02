@@ -27,6 +27,16 @@
  * settle, not one per frame.
  */
 
+import type { FilterModel } from "./model.js";
+import { PREVIEW_COLOR } from "./model.js";
+import type { DimensionScales, RoiShapeJson } from "./roi_geometry.js";
+import {
+  parseDimensions,
+  randomAnnotationId,
+  shapeToAnnotation,
+} from "./roi_geometry.js";
+import type { FilterResult } from "./segment_state.js";
+import { segmentStateFromResult } from "./segment_state.js";
 import type { ApplyPath } from "../host/viewer_api.js";
 import {
   annotationDimensions,
@@ -43,11 +53,6 @@ import {
 } from "../host/viewer_api.js";
 import type { PythonClient } from "../python/client.js";
 import { Signal, debounce } from "../util/signal.js";
-import { FilterModel, PREVIEW_COLOR } from "./model.js";
-import type { DimensionScales, RoiShapeJson } from "./roi_geometry.js";
-import { parseDimensions, randomAnnotationId, shapeToAnnotation } from "./roi_geometry.js";
-import type { FilterResult } from "./segment_state.js";
-import { segmentStateFromResult } from "./segment_state.js";
 
 export const ROI_LAYER_NAME = "ngpy ROIs";
 
@@ -56,7 +61,10 @@ export function roiLayerSpec(dimensions: any, name = ROI_LAYER_NAME): any {
   return {
     type: "annotation",
     name,
-    source: { url: "local://annotations", transform: { outputDimensions: dimensions } },
+    source: {
+      url: "local://annotations",
+      transform: { outputDimensions: dimensions },
+    },
     tool: "annotateBoundingBox",
     annotationProperties: [
       { id: "color", type: "rgb", default: "#ffff00" },
@@ -82,7 +90,12 @@ export interface StoreInfo {
   units: string | null;
   unitMeters: number;
   axes: string[];
-  levels: { level: number; vertexCount: number; objectSparsity: number; numObjects: number }[];
+  levels: {
+    level: number;
+    vertexCount: number;
+    objectSparsity: number;
+    numObjects: number;
+  }[];
   objectAttributes: { name: string; dtype: string; ncols: number }[];
   vertexAttributes: string[];
   defaultLevel: number;
@@ -188,10 +201,13 @@ export class FilterController {
       this.storeInfoChanged.dispatch();
       return undefined;
     }
-    if (this.storeInfoFor === source && this.storeInfo !== undefined) return this.storeInfo;
+    if (this.storeInfoFor === source && this.storeInfo !== undefined)
+      return this.storeInfo;
     this.setStatus("Reading store metadata…", "busy");
     try {
-      this.storeInfo = await this.python.callJson<StoreInfo>("store_info", { source });
+      this.storeInfo = await this.python.callJson<StoreInfo>("store_info", {
+        source,
+      });
       this.storeInfoFor = source;
       this.setStatus("", "");
     } catch (e) {
@@ -221,7 +237,9 @@ export class FilterController {
     this.unwatchRoi = undefined;
     this.watchedRoiLayer = name;
     if (name === undefined) return;
-    this.unwatchRoi = watchAnnotations(this.viewer, name, () => this.onAnnotationsChanged());
+    this.unwatchRoi = watchAnnotations(this.viewer, name, () =>
+      this.onAnnotationsChanged(),
+    );
   }
 
   private onAnnotationsChanged() {
@@ -230,12 +248,15 @@ export class FilterController {
     const anns = readAnnotations(this.viewer, name).filter(
       (a) => a.type === "axis_aligned_bounding_box" || a.type === "ellipsoid",
     );
-    const json = JSON.stringify(anns.map((a) => [a.id, a.pointA, a.pointB, a.center, a.radii]));
+    const json = JSON.stringify(
+      anns.map((a) => [a.id, a.pointA, a.pointB, a.center, a.radii]),
+    );
     if (json === this.lastAnnotationsJson) return;
     this.lastAnnotationsJson = json;
     // syncAnnotations dispatches `changed` (and so schedules) when membership
     // changed; geometry-only edits need an explicit schedule.
-    if (!this.model.syncAnnotations(anns.map((a) => String(a.id)))) this.schedule();
+    if (!this.model.syncAnnotations(anns.map((a) => String(a.id))))
+      this.schedule();
   }
 
   /** The annotation-to-store coordinate mapping, or undefined before store info. */
@@ -248,14 +269,20 @@ export class FilterController {
         ? annotationDimensions(this.viewer, roiLayer)
         : (stateJson(this.viewer)?.dimensions ?? {});
     const { names, scalesM } = parseDimensions(dims);
-    return { names, scalesM, storeAxes: info.axes, storeUnitM: info.unitMeters };
+    return {
+      names,
+      scalesM,
+      storeAxes: info.axes,
+      storeUnitM: info.unitMeters,
+    };
   }
 
   annotationsById(): Map<string, any> {
     const name = this.model.settings.roiLayer;
     const map = new Map<string, any>();
     if (name === undefined) return map;
-    for (const a of readAnnotations(this.viewer, name)) map.set(String(a.id), a);
+    for (const a of readAnnotations(this.viewer, name))
+      map.set(String(a.id), a);
     return map;
   }
 
@@ -301,11 +328,16 @@ export class FilterController {
     let result: EvaluationResult | undefined;
     if (this.model.isActive()) {
       this.setStatus(
-        this.lastResult === undefined ? "Reading the store and evaluating…" : "Evaluating…",
+        this.lastResult === undefined
+          ? "Reading the store and evaluating…"
+          : "Evaluating…",
         "busy",
       );
       try {
-        result = await this.python.callJson<EvaluationResult>("filter_evaluate", request);
+        result = await this.python.callJson<EvaluationResult>(
+          "filter_evaluate",
+          request,
+        );
       } catch (e) {
         this.setStatus(`Filter failed: ${(e as Error).message}`, "error");
         return;
@@ -319,13 +351,19 @@ export class FilterController {
     try {
       this.lastApplyPath = applySegmentState(this.viewer, target, update);
     } catch (e) {
-      this.setStatus(`Could not update layer ${target}: ${(e as Error).message}`, "error");
+      this.setStatus(
+        `Could not update layer ${target}: ${(e as Error).message}`,
+        "error",
+      );
       return;
     }
     if (result === undefined) {
       this.setStatus("Filter inactive: all objects shown.", "");
     } else {
-      const pct = result.storeObjects > 0 ? (100 * result.levelObjects) / result.storeObjects : 100;
+      const pct =
+        result.storeObjects > 0
+          ? (100 * result.levelObjects) / result.storeObjects
+          : 100;
       this.setStatus(
         `${result.segments.length.toLocaleString()} of ${result.levelObjects.toLocaleString()} ` +
           `objects pass (level ${result.level}: ${pct.toFixed(pct < 1 ? 2 : 0)}% of ` +
@@ -343,7 +381,9 @@ export class FilterController {
     const name = this.model.settings.roiLayer;
     if (name === undefined) return;
     const spec = layerJson(this.viewer, name);
-    const propIds: string[] = (spec?.annotationProperties ?? []).map((p: any) => p.id);
+    const propIds: string[] = (spec?.annotationProperties ?? []).map(
+      (p: any) => p.id,
+    );
     const ci = propIds.indexOf("color");
     const ei = propIds.indexOf("exclude");
     if (ci < 0) return;
@@ -388,7 +428,10 @@ export class FilterController {
       );
     } catch (e) {
       this.labelInfo = undefined;
-      this.setStatus(`Cannot read the parcellation: ${(e as Error).message}`, "error");
+      this.setStatus(
+        `Cannot read the parcellation: ${(e as Error).message}`,
+        "error",
+      );
     }
     return this.labelInfo;
   }

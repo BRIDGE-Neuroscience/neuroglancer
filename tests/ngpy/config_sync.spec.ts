@@ -42,7 +42,10 @@ function fakeViewer() {
   return {
     element,
     state: { toJSON: () => ({ layout: "3d" }) },
-    mouseState: { updateUnconditionally: () => true, position: new Float32Array([1, 2, 3]) },
+    mouseState: {
+      updateUnconditionally: () => true,
+      position: new Float32Array([1, 2, 3]),
+    },
     layerSelectedValues: { toJSON: () => ({ tracts: { value: "5" } }) },
     inputEventBindings: {
       global: new FakeMap(),
@@ -67,7 +70,11 @@ describe("ConfigSync", () => {
     expect(sent).toEqual([
       [
         "my-action",
-        { mousePosition: [1, 2, 3], selectedValues: { tracts: { value: "5" } }, viewerState: { layout: "3d" } },
+        {
+          mousePosition: [1, 2, 3],
+          selectedValues: { tracts: { value: "5" } },
+          viewerState: { layout: "3d" },
+        },
       ],
     ]);
     sync.apply({ actions: [] });
@@ -77,13 +84,27 @@ describe("ConfigSync", () => {
 
   it("adds key bindings as a priority-1000 parent map, replaced on each config", () => {
     const viewer = fakeViewer();
-    const sync = new ConfigSync(viewer, { sendAction: () => {}, setStatusMessages: () => {} });
-    sync.apply({ inputEventBindings: { viewer: { keyt: "my-action" }, dataView: { "at:dblclick0": "pick" } } });
+    const sync = new ConfigSync(viewer, {
+      sendAction: () => {},
+      setStatusMessages: () => {},
+    });
+    sync.apply({
+      inputEventBindings: {
+        viewer: { keyt: "my-action" },
+        dataView: { "at:dblclick0": "pick" },
+      },
+    });
     const [child, priority] = viewer.inputEventBindings.global.parents[0];
     expect(priority).toBe(1000);
     expect([...child.bindings]).toEqual([["keyt", "my-action"]]);
-    const dataView = viewer.inputEventBindings.sliceView.parents.find(([, p]) => p === 999)![0];
-    expect(viewer.inputEventBindings.perspectiveView.parents.some(([m]) => m === dataView)).toBe(true);
+    const dataView = viewer.inputEventBindings.sliceView.parents.find(
+      ([, p]) => p === 999,
+    )![0];
+    expect(
+      viewer.inputEventBindings.perspectiveView.parents.some(
+        ([m]) => m === dataView,
+      ),
+    ).toBe(true);
     expect([...dataView.bindings]).toEqual([["at:dblclick0", "pick"]]);
     sync.apply({ inputEventBindings: { viewer: {} } });
     expect(child.bindings.size).toBe(0);
@@ -93,7 +114,10 @@ describe("ConfigSync", () => {
   it("forwards status messages and UI options", () => {
     const viewer = fakeViewer();
     let messages: Record<string, string> = {};
-    const sync = new ConfigSync(viewer, { sendAction: () => {}, setStatusMessages: (m) => (messages = m) });
+    const sync = new ConfigSync(viewer, {
+      sendAction: () => {},
+      setStatusMessages: (m) => (messages = m),
+    });
     sync.apply({ statusMessages: { a: "hello" }, showLayerPanel: false });
     expect(messages).toEqual({ a: "hello" });
     expect(viewer.uiConfiguration.showLayerPanel.value).toBe(false);

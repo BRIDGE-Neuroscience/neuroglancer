@@ -26,7 +26,10 @@
  */
 
 import type { SegmentStateUpdate } from "../filter/segment_state.js";
-import { applyTargeted, applyToViewerStateJson } from "../filter/segment_state.js";
+import {
+  applyTargeted,
+  applyToViewerStateJson,
+} from "../filter/segment_state.js";
 
 export function stateJson(viewer: any): any {
   return viewer.state.toJSON();
@@ -36,7 +39,10 @@ export function layerSpecs(viewer: any): any[] {
   const layers = stateJson(viewer)?.layers;
   if (Array.isArray(layers)) return layers;
   if (layers && typeof layers === "object") {
-    return Object.entries(layers).map(([name, spec]: [string, any]) => ({ ...spec, name }));
+    return Object.entries(layers).map(([name, spec]: [string, any]) => ({
+      ...spec,
+      name,
+    }));
   }
   return [];
 }
@@ -61,7 +67,10 @@ export function layerSourceUrls(spec: any): string[] {
 }
 
 export function isZarrVectorsUrl(url: string): boolean {
-  return /\|zarr-vectors:|^zarr-vectors:\/\//.test(url) || /\.(zarrvectors|zvf|zv)\/?$/.test(url);
+  return (
+    /\|zarr-vectors:|^zarr-vectors:\/\//.test(url) ||
+    /\.(zarrvectors|zvf|zv)\/?$/.test(url)
+  );
 }
 
 /** Replace the whole state (rebuilds every layer -- use sparingly). */
@@ -86,10 +95,17 @@ export function applySegmentState(
   update: SegmentStateUpdate,
 ): ApplyPath {
   const m = managedLayer(viewer, layerName);
-  if (m?.layer !== undefined && m.layer !== null && applyTargeted(m.layer, update)) {
+  if (
+    m?.layer !== undefined &&
+    m.layer !== null &&
+    applyTargeted(m.layer, update)
+  ) {
     return "targeted";
   }
-  restoreState(viewer, applyToViewerStateJson(stateJson(viewer), layerName, update));
+  restoreState(
+    viewer,
+    applyToViewerStateJson(stateJson(viewer), layerName, update),
+  );
   return "state";
 }
 
@@ -113,7 +129,7 @@ export function setSkeletonShader(
       ? {
           ...l,
           skeletonRendering: {
-            ...(l.skeletonRendering ?? {}),
+            ...l.skeletonRendering,
             shader,
             shaderControls: controls,
           },
@@ -132,12 +148,17 @@ export function annotationSource(viewer: any, layerName: string): any {
 
 export function readAnnotations(viewer: any, layerName: string): any[] {
   const src = annotationSource(viewer, layerName);
-  if (src !== undefined && typeof src.toJSON === "function") return src.toJSON() ?? [];
+  if (src !== undefined && typeof src.toJSON === "function")
+    return src.toJSON() ?? [];
   return layerJson(viewer, layerName)?.annotations ?? [];
 }
 
 /** Replace the annotations of a local annotation layer (references survive). */
-export function writeAnnotations(viewer: any, layerName: string, annotations: any[]): boolean {
+export function writeAnnotations(
+  viewer: any,
+  layerName: string,
+  annotations: any[],
+): boolean {
   const src = annotationSource(viewer, layerName);
   if (src === undefined || typeof src.restoreState !== "function") return false;
   src.restoreState(annotations);
@@ -148,7 +169,9 @@ export function writeAnnotations(viewer: any, layerName: string, annotations: an
 export function annotationDimensions(viewer: any, layerName: string): any {
   const spec = layerJson(viewer, layerName);
   const src = Array.isArray(spec?.source) ? spec.source[0] : spec?.source;
-  return src?.transform?.outputDimensions ?? stateJson(viewer)?.dimensions ?? {};
+  return (
+    src?.transform?.outputDimensions ?? stateJson(viewer)?.dimensions ?? {}
+  );
 }
 
 /**
@@ -170,7 +193,8 @@ export function watchAnnotations(
     attachedTo = src;
     if (src?.changed?.add !== undefined) {
       const d = src.changed.add(callback);
-      detachSource = typeof d === "function" ? d : () => src.changed.remove?.(callback);
+      detachSource =
+        typeof d === "function" ? d : () => src.changed.remove?.(callback);
     }
     callback();
   };

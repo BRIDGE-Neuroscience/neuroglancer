@@ -33,7 +33,11 @@ import { SharedStateSync } from "./host/state_sync.js";
 import { stateJson } from "./host/viewer_api.js";
 import { ViewerHost } from "./host/viewer_host.js";
 import type { PageParams } from "./params.js";
-import { buildWrapperHash, parseWrapperHash, resolveScriptUrl } from "./params.js";
+import {
+  buildWrapperHash,
+  parseWrapperHash,
+  resolveScriptUrl,
+} from "./params.js";
 import { DEFAULT_PYODIDE_INDEX_URL, PythonClient } from "./python/client.js";
 import { PythonPanel } from "./python/panel.js";
 import { StorePanel } from "./store/panel.js";
@@ -51,7 +55,10 @@ export class App {
   readonly python: PythonClient;
   readonly host: ViewerHost;
   readonly model = new FilterModel();
-  private tabs = new Map<string, { button: HTMLButtonElement; panel: HTMLElement }>();
+  private tabs = new Map<
+    string,
+    { button: HTMLButtonElement; panel: HTMLElement }
+  >();
   private tabBar = h("nav", { class: "ngpy-tabs" });
   private tabBody = h("div", { class: "ngpy-tab-body" });
   private statusPython = h("span", { class: "ngpy-chip" }, "Python: idle");
@@ -68,28 +75,45 @@ export class App {
     embedded: Embedded,
   ) {
     const initial = parseWrapperHash(window.location.hash);
-    if (initial.ngpy?.filter !== undefined) this.model.restoreState(initial.ngpy.filter);
+    if (initial.ngpy?.filter !== undefined)
+      this.model.restoreState(initial.ngpy.filter);
 
     const side = h("aside", { class: "ngpy-side" }, this.tabBar, this.tabBody);
-    const splitter = h("div", { class: "ngpy-splitter", title: "Drag to resize" });
+    const splitter = h("div", {
+      class: "ngpy-splitter",
+      title: "Drag to resize",
+    });
     const main = h("main", { class: "ngpy-main" });
     const statusBar = h(
       "footer",
       { class: "ngpy-statusbar" },
-      h("b", { title: `built ${embedded.buildInfo.builtAt}` }, `ngpy ${embedded.buildInfo.version}`),
+      h(
+        "b",
+        { title: `built ${embedded.buildInfo.builtAt}` },
+        `ngpy ${embedded.buildInfo.version}`,
+      ),
       this.statusPython,
       this.statusViewer,
       this.statusMessages,
     );
-    root.append(h("div", { class: "ngpy-layout" }, side, splitter, main), statusBar);
+    root.append(
+      h("div", { class: "ngpy-layout" }, side, splitter, main),
+      statusBar,
+    );
     this.installSplitter(side, splitter);
 
     this.host = new ViewerHost(main, params.ngUrl, initial.viewer);
     this.python = new PythonClient(embedded.workerSource, embedded.payload);
-    this.pythonPanel = new PythonPanel(this.python, () => this.sync?.flush() ?? Promise.resolve(), embedded.demoScript);
+    this.pythonPanel = new PythonPanel(
+      this.python,
+      () => this.sync?.flush() ?? Promise.resolve(),
+      embedded.demoScript,
+    );
     this.addTab("python", "Python", this.pythonPanel.element);
     this.python.statusChanged.add(() => this.renderPythonStatus());
-    this.python.progress.add((m) => (this.statusPython.textContent = `Python: ${m}`));
+    this.python.progress.add(
+      (m) => (this.statusPython.textContent = `Python: ${m}`),
+    );
     this.renderPythonStatus();
   }
 
@@ -97,14 +121,18 @@ export class App {
     if (this.params.startPython) {
       const indexURL = this.params.pyodideIndexUrl ?? DEFAULT_PYODIDE_INDEX_URL;
       void this.python
-        .start(indexURL, { pageUrl: window.location.href, viewerUrl: this.params.ngUrl })
+        .start(indexURL, {
+          pageUrl: window.location.href,
+          viewerUrl: this.params.ngUrl,
+        })
         .catch((e) => console.error("ngpy: Python failed to start", e));
     }
     const viewer = await this.host.ready;
     if (viewer === undefined) {
-      this.statusViewer.textContent = this.host.crossOriginDetected || !this.host.sameOrigin
-        ? "Viewer: cross-origin — write-only (#! hash) control; Filter and scripts cannot read it"
-        : "Viewer: not found (is ?ng= a Neuroglancer build?)";
+      this.statusViewer.textContent =
+        this.host.crossOriginDetected || !this.host.sameOrigin
+          ? "Viewer: cross-origin — write-only (#! hash) control; Filter and scripts cannot read it"
+          : "Viewer: not found (is ?ng= a Neuroglancer build?)";
       this.statusViewer.dataset.kind = "error";
       this.addTab("guide", "Guide", makeGuidePanel());
       this.selectTab("python");
@@ -116,9 +144,17 @@ export class App {
   }
 
   private attachViewer(viewer: any) {
-    const controller = (this.controller = new FilterController(viewer, this.python, this.model));
+    const controller = (this.controller = new FilterController(
+      viewer,
+      this.python,
+      this.model,
+    ));
     const filterPanel = new FilterPanel(controller);
-    const storePanel = new StorePanel(controller, this.params.roiStore, () => window.location.href);
+    const storePanel = new StorePanel(
+      controller,
+      this.params.roiStore,
+      () => window.location.href,
+    );
     const exportPanel = new ExportPanel(controller, storePanel);
     this.addTab("filter", "Filter", filterPanel.element);
     this.addTab("export", "Export", exportPanel.element);
@@ -128,7 +164,9 @@ export class App {
 
     // Shared state <-> Python.
     this.sync = new SharedStateSync(viewer.state, async (msg) =>
-      JSON.parse(await this.python.call<string>("client_state", [JSON.stringify(msg)])),
+      JSON.parse(
+        await this.python.call<string>("client_state", [JSON.stringify(msg)]),
+      ),
     );
     this.configSync = new ConfigSync(viewer, {
       sendAction: (action, state) =>
@@ -139,7 +177,8 @@ export class App {
     });
     this.python.emitted.add((kind, text) => {
       const msg = JSON.parse(text);
-      if (kind === "state" && msg.k === "s") this.sync?.setServerState(msg.s, msg.g);
+      if (kind === "state" && msg.k === "s")
+        this.sync?.setServerState(msg.s, msg.g);
       else if (kind === "state" && msg.k === "c") this.configSync?.apply(msg.s);
       else if (kind === "generation") this.sync?.setServerGeneration(msg.g);
       else if (kind === "gui") this.handleGuiRequest(msg);
@@ -153,7 +192,11 @@ export class App {
           { filter: this.model.toJSON() },
           this.model.isActive() ? this.model.settings.targetLayer : undefined,
         );
-        history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+        history.replaceState(
+          null,
+          "",
+          `${window.location.pathname}${window.location.search}${hash}`,
+        );
       } catch (e) {
         console.warn("ngpy: could not update the page URL", e);
       }
@@ -198,7 +241,8 @@ export class App {
     try {
       const url = resolveScriptUrl(script, window.location.href);
       const response = await fetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status} fetching ${url}`);
+      if (!response.ok)
+        throw new Error(`HTTP ${response.status} fetching ${url}`);
       this.pythonPanel.load(await response.text(), true);
       this.selectTab("python");
       await this.pythonPanel.run();
@@ -209,14 +253,21 @@ export class App {
 
   private renderPythonStatus() {
     const p = this.python;
-    this.statusPython.dataset.kind = p.status === "ready" ? "ok" : p.status === "failed" ? "error" : "busy";
-    if (p.status === "ready") this.statusPython.textContent = `Python ${p.info?.python ?? ""} ready${p.jspi ? " · JSPI" : ""}`;
-    else if (p.status === "failed") this.statusPython.textContent = "Python failed";
+    this.statusPython.dataset.kind =
+      p.status === "ready" ? "ok" : p.status === "failed" ? "error" : "busy";
+    if (p.status === "ready")
+      this.statusPython.textContent = `Python ${p.info?.python ?? ""} ready${p.jspi ? " · JSPI" : ""}`;
+    else if (p.status === "failed")
+      this.statusPython.textContent = "Python failed";
     else if (p.status === "idle") this.statusPython.textContent = "Python: off";
   }
 
   addTab(id: string, label: string, panel: HTMLElement) {
-    const button = h("button", { type: "button", class: "ngpy-tab", onclick: () => this.selectTab(id) }, label);
+    const button = h(
+      "button",
+      { type: "button", class: "ngpy-tab", onclick: () => this.selectTab(id) },
+      label,
+    );
     this.tabBar.append(button);
     panel.hidden = true;
     this.tabBody.append(panel);

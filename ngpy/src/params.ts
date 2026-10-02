@@ -69,7 +69,8 @@ export function parseWrapperHash(hash: string): WrapperState {
   } catch {
     return { viewer: undefined, ngpy: undefined };
   }
-  if (json === null || typeof json !== "object") return { viewer: undefined, ngpy: undefined };
+  if (json === null || typeof json !== "object")
+    return { viewer: undefined, ngpy: undefined };
   const { ngpy, ...viewer } = json;
   return { viewer: Object.keys(viewer).length ? viewer : undefined, ngpy };
 }

@@ -23,7 +23,6 @@
  * listing and loading are anonymous; only writes carry a token.
  */
 
-import { Signal } from "../util/signal.js";
 import type { RoiGroupDocument, RoiGroupSummary } from "./schema.js";
 import {
   parseRoiGroupDocument,
@@ -32,6 +31,7 @@ import {
   ROI_GROUP_PREFIX,
   roiGroupObjectName,
 } from "./schema.js";
+import { Signal } from "../util/signal.js";
 
 export const DEFAULT_STORAGE_ENDPOINT = "https://storage.googleapis.com";
 
@@ -68,7 +68,10 @@ export class RoiStoreListForbiddenError extends Error {
   }
 }
 
-export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+export type FetchLike = (
+  input: string,
+  init?: RequestInit,
+) => Promise<Response>;
 
 export interface RoiGroupStoreOptions {
   bucket: string;
@@ -85,7 +88,10 @@ export class RoiGroupStore {
 
   constructor(options: RoiGroupStoreOptions) {
     this.bucket = options.bucket;
-    this.endpoint = (options.endpoint ?? DEFAULT_STORAGE_ENDPOINT).replace(/\/+$/, "");
+    this.endpoint = (options.endpoint ?? DEFAULT_STORAGE_ENDPOINT).replace(
+      /\/+$/,
+      "",
+    );
     this.auth = options.auth;
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
   }
@@ -117,7 +123,10 @@ export class RoiGroupStore {
     do {
       const url = new URL(this.objectApiUrl);
       url.searchParams.set("prefix", ROI_GROUP_PREFIX);
-      url.searchParams.set("fields", "nextPageToken,items(name,updated,metadata)");
+      url.searchParams.set(
+        "fields",
+        "nextPageToken,items(name,updated,metadata)",
+      );
       if (pageToken !== undefined) url.searchParams.set("pageToken", pageToken);
       const response = await this.fetchListPage(url.toString(), signal);
       const page = await response.json();
@@ -138,12 +147,16 @@ export class RoiGroupStore {
     return summaries;
   }
 
-  private async fetchListPage(url: string, signal?: AbortSignal): Promise<Response> {
+  private async fetchListPage(
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     try {
       return await this.fetchOk(url, { signal });
     } catch (error) {
       const refused =
-        error instanceof HttpError && (error.status === 401 || error.status === 403);
+        error instanceof HttpError &&
+        (error.status === 401 || error.status === 403);
       if (!refused) throw error;
       const token = this.auth?.cachedAccessToken;
       if (token === undefined) throw new RoiStoreListForbiddenError(false);
@@ -222,7 +235,8 @@ export class RoiGroupStore {
     signal?: AbortSignal,
   ): Promise<Response> {
     const { auth } = this;
-    if (auth === undefined) throw new Error("Saving to the ROI store requires sign-in");
+    if (auth === undefined)
+      throw new Error("Saving to the ROI store requires sign-in");
     for (let attempt = 0; ; ++attempt) {
       const token = await auth.getAccessToken(signal);
       const headers = new Headers(init.headers);
@@ -231,7 +245,8 @@ export class RoiGroupStore {
         return await this.fetchOk(url, { ...init, headers, signal });
       } catch (error) {
         const rejected =
-          error instanceof HttpError && (error.status === 401 || error.status === 403);
+          error instanceof HttpError &&
+          (error.status === 401 || error.status === 403);
         if (!rejected || attempt > 0) throw error;
         auth.invalidate();
       }

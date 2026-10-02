@@ -18,12 +18,12 @@
 
 import { describe, expect, it } from "vitest";
 import { FilterModel, PREVIEW_COLOR } from "../../ngpy/src/filter/model.js";
+import type { DimensionScales } from "../../ngpy/src/filter/roi_geometry.js";
 import {
   annotationToShape,
   parseDimensions,
   shapeToAnnotation,
 } from "../../ngpy/src/filter/roi_geometry.js";
-import type { DimensionScales } from "../../ngpy/src/filter/roi_geometry.js";
 
 // Global frame x,y,z in mm (the demo's pin); store in mm.
 const MM: DimensionScales = {
@@ -47,9 +47,14 @@ describe("roi geometry", () => {
       upper: [10, 20, 5],
     });
     expect(
-      annotationToShape({ type: "ellipsoid", id: "e", center: [1, 2, 3], radii: [-4, 5, 6] }, MM),
+      annotationToShape(
+        { type: "ellipsoid", id: "e", center: [1, 2, 3], radii: [-4, 5, 6] },
+        MM,
+      ),
     ).toEqual({ type: "ellipsoid", center: [1, 2, 3], radii: [4, 5, 6] });
-    expect(annotationToShape({ type: "point", point: [1, 2, 3] }, MM)).toBeUndefined();
+    expect(
+      annotationToShape({ type: "point", point: [1, 2, 3] }, MM),
+    ).toBeUndefined();
   });
 
   it("matches axes by name and converts units", () => {
@@ -59,7 +64,10 @@ describe("roi geometry", () => {
       storeAxes: ["x", "y", "z"],
       storeUnitM: 0.001,
     };
-    const shape = annotationToShape(box("a", [3000, 2000, 1000], [3000, 2000, 1000]), scales);
+    const shape = annotationToShape(
+      box("a", [3000, 2000, 1000], [3000, 2000, 1000]),
+      scales,
+    );
     expect(shape).toEqual({ type: "box", lower: [1, 2, 3], upper: [1, 2, 3] });
     // ...and back.
     const ann = shapeToAnnotation(shape!, scales, "id1");
@@ -75,7 +83,10 @@ describe("FilterModel", () => {
     const g2 = m.addGroup();
     m.syncAnnotations(["a", "b"]);
     expect(m.findAnnotation("b")!.group.id).toBe(g2.id);
-    expect(m.findAnnotation("b")!.group.rois[0]).toMatchObject({ operator: "and", predicate: "any_segment" });
+    expect(m.findAnnotation("b")!.group.rois[0]).toMatchObject({
+      operator: "and",
+      predicate: "any_segment",
+    });
     expect(m.syncAnnotations(["a", "b"])).toBe(false);
     m.syncAnnotations(["b"]);
     expect(m.findAnnotation("a")).toBeUndefined();
@@ -88,11 +99,19 @@ describe("FilterModel", () => {
     m.syncAnnotations(["a", "b"]);
     g.rois[1].operator = "andnot";
     g.rois[1].predicate = "either_endpoint";
-    g.rois.push({ kind: "labels", labels: [17, 53], operator: "and", predicate: "any_vertex" });
+    g.rois.push({
+      kind: "labels",
+      labels: [17, 53],
+      operator: "and",
+      predicate: "any_vertex",
+    });
     g.attrFilters.push({ name: "tortuosity", min: 1, max: 2 });
     const annotations = new Map<string, any>([
       ["a", box("a", [0, 0, 0], [10, 10, 10])],
-      ["b", { type: "ellipsoid", id: "b", center: [5, 5, 5], radii: [1, 2, 3] }],
+      [
+        "b",
+        { type: "ellipsoid", id: "b", center: [5, 5, 5], radii: [1, 2, 3] },
+      ],
     ]);
     expect(m.groupJson(g, annotations, MM)).toEqual({
       name: "CST",
@@ -109,7 +128,11 @@ describe("FilterModel", () => {
           predicate: "either_endpoint",
           operator: "andnot",
         },
-        { shape: { type: "labelMask", labels: [17, 53] }, predicate: "any_vertex", operator: "and" },
+        {
+          shape: { type: "labelMask", labels: [17, 53] },
+          predicate: "any_vertex",
+          operator: "and",
+        },
       ],
       attrFilters: [{ name: "tortuosity", min: 1, max: 2 }],
     });
@@ -124,7 +147,14 @@ describe("FilterModel", () => {
       color: "#123456",
       visible: true,
       opacity: 1,
-      rois: [{ kind: "labels", labels: [1], operator: "and", predicate: "any_vertex" }],
+      rois: [
+        {
+          kind: "labels",
+          labels: [1],
+          operator: "and",
+          predicate: "any_vertex",
+        },
+      ],
       attrFilters: [],
     });
     expect(m.isActive()).toBe(true);

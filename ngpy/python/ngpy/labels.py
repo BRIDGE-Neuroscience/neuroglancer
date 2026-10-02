@@ -191,7 +191,12 @@ async def _open_ome_zarr(base, fetch, scale_index, max_voxels) -> LabelVolume:
         data = np.asarray(await array.getitem(tuple(slice(None) for _ in array.shape)))
         names = ["z", "y", "x"][-data.ndim :] if data.ndim <= 3 else []
         return LabelVolume(
-            data, names, np.full(data.ndim, 1e-3), np.zeros(data.ndim), base, "bare array"
+            data,
+            names,
+            np.full(data.ndim, 1e-3),
+            np.zeros(data.ndim),
+            base,
+            "bare array",
         )
     ms = multiscales[0]
     axes_meta = ms.get("axes") or [{"name": n} for n in ("z", "y", "x")]
@@ -225,7 +230,11 @@ async def _open_ome_zarr(base, fetch, scale_index, max_voxels) -> LabelVolume:
             scale, trans = scale * s, trans * s
         elif t.get("type") == "translation":
             trans = trans + np.asarray(t["translation"], dtype=np.float64)
-    keep = [i for i, a in enumerate(axes_meta) if not isinstance(a, dict) or a.get("type", "space") == "space"]
+    keep = [
+        i
+        for i, a in enumerate(axes_meta)
+        if not isinstance(a, dict) or a.get("type", "space") == "space"
+    ]
     if len(keep) != len(axes):
         # Drop non-space axes (channel/time) by taking index 0 along them.
         sel = tuple(slice(None) if i in keep else 0 for i in range(len(axes)))

@@ -27,7 +27,10 @@ import {
   RoiStoreListForbiddenError,
   roiGroupStoreChanged,
 } from "../../ngpy/src/store/gcs_client.js";
-import { makeRoiGroupDocument, parseRoiGroupDocument } from "../../ngpy/src/store/schema.js";
+import {
+  makeRoiGroupDocument,
+  parseRoiGroupDocument,
+} from "../../ngpy/src/store/schema.js";
 
 interface StoredObject {
   body: string | Uint8Array;
@@ -35,17 +38,24 @@ interface StoredObject {
   metadata: Record<string, string>;
 }
 
-function fakeGcs(options: { pageSize?: number; anonymousList?: boolean; token?: string } = {}) {
+function fakeGcs(
+  options: { pageSize?: number; anonymousList?: boolean; token?: string } = {},
+) {
   const objects = new Map<string, StoredObject>();
   const requests: { method: string; url: string; auth: string | null }[] = [];
   const pageSize = options.pageSize ?? 1000;
-  const fetchImpl = async (input: string, init: RequestInit = {}): Promise<Response> => {
+  const fetchImpl = async (
+    input: string,
+    init: RequestInit = {},
+  ): Promise<Response> => {
     const url = new URL(input);
     const method = init.method ?? "GET";
     const auth = new Headers(init.headers).get("Authorization");
     requests.push({ method, url: input, auth });
     const authorised = auth === `Bearer ${options.token ?? "good"}`;
-    const m = /^\/(upload\/)?storage\/v1\/b\/([^/]+)\/o(?:\/(.+))?$/.exec(url.pathname);
+    const m = /^\/(upload\/)?storage\/v1\/b\/([^/]+)\/o(?:\/(.+))?$/.exec(
+      url.pathname,
+    );
     if (m === null) return new Response("not found", { status: 404 });
     const [, upload, , encodedName] = m;
     if (upload) {
@@ -60,10 +70,16 @@ function fakeGcs(options: { pageSize?: number; anonymousList?: boolean; token?: 
           .map((p) => p.slice(p.indexOf("\r\n\r\n") + 4).trim());
         const meta = JSON.parse(parts[0]);
         const doc = parts[1];
-        objects.set(meta.name, { body: doc, contentType: meta.contentType, metadata: meta.metadata });
+        objects.set(meta.name, {
+          body: doc,
+          contentType: meta.contentType,
+          metadata: meta.metadata,
+        });
       } else {
         const name = url.searchParams.get("name")!;
-        const body = new Uint8Array(await new Response(init.body as BodyInit).arrayBuffer());
+        const body = new Uint8Array(
+          await new Response(init.body as BodyInit).arrayBuffer(),
+        );
         objects.set(name, {
           body,
           contentType: new Headers(init.headers).get("Content-Type") ?? "",
@@ -87,12 +103,20 @@ function fakeGcs(options: { pageSize?: number; anonymousList?: boolean; token?: 
       return new Response("forbidden", { status: 401 });
     }
     const prefix = url.searchParams.get("prefix") ?? "";
-    const names = [...objects.keys()].filter((n) => n.startsWith(prefix)).sort();
+    const names = [...objects.keys()]
+      .filter((n) => n.startsWith(prefix))
+      .sort();
     const start = Number(url.searchParams.get("pageToken") ?? 0);
     const page = names.slice(start, start + pageSize);
     return Response.json({
-      items: page.map((name) => ({ name, updated: "2026-10-02T00:00:00Z", metadata: objects.get(name)!.metadata })),
-      ...(start + pageSize < names.length ? { nextPageToken: String(start + pageSize) } : {}),
+      items: page.map((name) => ({
+        name,
+        updated: "2026-10-02T00:00:00Z",
+        metadata: objects.get(name)!.metadata,
+      })),
+      ...(start + pageSize < names.length
+        ? { nextPageToken: String(start + pageSize) }
+        : {}),
     });
   };
   return { objects, requests, fetch: fetchImpl };
@@ -124,8 +148,16 @@ const GROUP = {
   color: "#ff0000",
   opacity: 0.42,
   rois: [
-    { shape: { type: "ellipsoid", center: [1.5, -2.5, 3.5], radii: [4, 5, 6] }, predicate: "any_segment", operator: "and" },
-    { shape: { type: "box", lower: [0, 0, 0], upper: [10, 20, 30] }, predicate: "either_endpoint", operator: "andnot" },
+    {
+      shape: { type: "ellipsoid", center: [1.5, -2.5, 3.5], radii: [4, 5, 6] },
+      predicate: "any_segment",
+      operator: "and",
+    },
+    {
+      shape: { type: "box", lower: [0, 0, 0], upper: [10, 20, 30] },
+      predicate: "either_endpoint",
+      operator: "andnot",
+    },
   ],
 };
 
@@ -141,7 +173,12 @@ function doc(name = "Arcuate L", id?: string) {
 describe("RoiGroupStore", () => {
   it("round-trips a group through save and read, under groups/<id>.json", async () => {
     const gcs = fakeGcs();
-    const store = new RoiGroupStore({ bucket: "b", endpoint: "http://gcs.test", auth: auth(), fetch: gcs.fetch });
+    const store = new RoiGroupStore({
+      bucket: "b",
+      endpoint: "http://gcs.test",
+      auth: auth(),
+      fetch: gcs.fetch,
+    });
     const d = doc();
     await store.save(d);
     expect(gcs.objects.has(`groups/${d.id}.json`)).toBe(true);
@@ -153,31 +190,59 @@ describe("RoiGroupStore", () => {
 
   it("lists anonymously from custom metadata, across pages", async () => {
     const gcs = fakeGcs({ pageSize: 2 });
-    const store = new RoiGroupStore({ bucket: "b", endpoint: "http://gcs.test", auth: auth(), fetch: gcs.fetch });
+    const store = new RoiGroupStore({
+      bucket: "b",
+      endpoint: "http://gcs.test",
+      auth: auth(),
+      fetch: gcs.fetch,
+    });
     for (const n of ["A", "B", "C"]) await store.save(doc(n));
-    gcs.objects.set("exports/x.trk", { body: "", contentType: "", metadata: {} });
+    gcs.objects.set("exports/x.trk", {
+      body: "",
+      contentType: "",
+      metadata: {},
+    });
     const list = await store.list();
     expect(list.map((s) => s.name).sort()).toEqual(["A", "B", "C"]);
     expect(list[0].sourceUrl).toBe("gs://b/tracts.zarrvectors/|zarr-vectors:");
-    const listCalls = gcs.requests.filter((r) => r.method === "GET" && r.url.includes("prefix="));
+    const listCalls = gcs.requests.filter(
+      (r) => r.method === "GET" && r.url.includes("prefix="),
+    );
     expect(listCalls.every((r) => r.auth === null)).toBe(true);
     expect(listCalls).toHaveLength(2);
   });
 
   it("escalates a refused listing to a HELD token, else explains", async () => {
     const gcs = fakeGcs({ anonymousList: false });
-    const signedIn = new RoiGroupStore({ bucket: "b", endpoint: "http://gcs.test", auth: auth(), fetch: gcs.fetch });
+    const signedIn = new RoiGroupStore({
+      bucket: "b",
+      endpoint: "http://gcs.test",
+      auth: auth(),
+      fetch: gcs.fetch,
+    });
     await expect(signedIn.list()).resolves.toEqual([]);
     const a = auth();
     a.invalidate();
-    const anonymous = new RoiGroupStore({ bucket: "b", endpoint: "http://gcs.test", auth: a, fetch: gcs.fetch });
-    await expect(anonymous.list()).rejects.toBeInstanceOf(RoiStoreListForbiddenError);
+    const anonymous = new RoiGroupStore({
+      bucket: "b",
+      endpoint: "http://gcs.test",
+      auth: a,
+      fetch: gcs.fetch,
+    });
+    await expect(anonymous.list()).rejects.toBeInstanceOf(
+      RoiStoreListForbiddenError,
+    );
   });
 
   it("retries a write ONCE with a fresh token after 401", async () => {
     const gcs = fakeGcs();
     const a = auth("stale");
-    const store = new RoiGroupStore({ bucket: "b", endpoint: "http://gcs.test", auth: a, fetch: gcs.fetch });
+    const store = new RoiGroupStore({
+      bucket: "b",
+      endpoint: "http://gcs.test",
+      auth: a,
+      fetch: gcs.fetch,
+    });
     await store.save(doc());
     expect(a.invalidations).toBe(1);
     const uploads = gcs.requests.filter((r) => r.url.includes("/upload/"));
@@ -186,12 +251,23 @@ describe("RoiGroupStore", () => {
 
   it("uploads export bytes under exports/ and deletes documents", async () => {
     const gcs = fakeGcs();
-    const store = new RoiGroupStore({ bucket: "b", endpoint: "http://gcs.test", auth: auth(), fetch: gcs.fetch });
+    const store = new RoiGroupStore({
+      bucket: "b",
+      endpoint: "http://gcs.test",
+      auth: auth(),
+      fetch: gcs.fetch,
+    });
     let changes = 0;
     const off = roiGroupStoreChanged.add(() => ++changes);
-    const name = await store.putObject("exports/d.trk", new Uint8Array([1, 2, 3]), "application/octet-stream");
+    const name = await store.putObject(
+      "exports/d.trk",
+      new Uint8Array([1, 2, 3]),
+      "application/octet-stream",
+    );
     expect(name).toBe("exports/d.trk");
-    expect([...(gcs.objects.get("exports/d.trk")!.body as Uint8Array)]).toEqual([1, 2, 3]);
+    expect([...(gcs.objects.get("exports/d.trk")!.body as Uint8Array)]).toEqual(
+      [1, 2, 3],
+    );
     const d = doc();
     await store.save(d);
     await store.delete(d.id);
@@ -210,7 +286,9 @@ describe("parseRoiGroupDocument", () => {
   it("accepts a document and rejects a newer schema", () => {
     const d = doc();
     expect(parseRoiGroupDocument(JSON.parse(JSON.stringify(d)))).toEqual(d);
-    expect(() => parseRoiGroupDocument({ ...d, schemaVersion: 2 })).toThrow(/newer/);
+    expect(() => parseRoiGroupDocument({ ...d, schemaVersion: 2 })).toThrow(
+      /newer/,
+    );
     expect(() => parseRoiGroupDocument({ ...d, group: [] })).toThrow();
   });
 });

@@ -27,7 +27,8 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   for (const [key, value] of Object.entries(props)) {
     if (value === undefined || value === null) continue;
     if (key === "class") el.className = String(value);
-    else if (key === "style" && typeof value === "object") Object.assign(el.style, value);
+    else if (key === "style" && typeof value === "object")
+      Object.assign(el.style, value);
     else if (key.startsWith("on") && typeof value === "function") {
       el.addEventListener(key.slice(2).toLowerCase(), value);
     } else if (key === "dataset") Object.assign(el.dataset, value);
@@ -41,7 +42,9 @@ export function h<K extends keyof HTMLElementTagNameMap>(
 export function append(parent: Node, children: (Child | Child[])[]) {
   for (const child of children.flat()) {
     if (child === null || child === undefined || child === false) continue;
-    parent.appendChild(child instanceof Node ? child : document.createTextNode(String(child)));
+    parent.appendChild(
+      child instanceof Node ? child : document.createTextNode(String(child)),
+    );
   }
 }
 
@@ -65,11 +68,19 @@ export function select(
   return s;
 }
 
-export function button(label: string, onClick: () => void, props: Record<string, any> = {}) {
+export function button(
+  label: string,
+  onClick: () => void,
+  props: Record<string, any> = {},
+) {
   return h("button", { type: "button", onclick: onClick, ...props }, label);
 }
 
-export function field(label: string, control: Node, hint?: string): HTMLElement {
+export function field(
+  label: string,
+  control: Node,
+  hint?: string,
+): HTMLElement {
   return h(
     "label",
     { class: "ngpy-field" },
@@ -79,18 +90,34 @@ export function field(label: string, control: Node, hint?: string): HTMLElement 
   );
 }
 
-export function section(title: string, ...children: (Child | Child[])[]): HTMLElement {
-  return h("section", { class: "ngpy-section" }, h("h3", {}, title), ...children);
+export function section(
+  title: string,
+  ...children: (Child | Child[])[]
+): HTMLElement {
+  return h(
+    "section",
+    { class: "ngpy-section" },
+    h("h3", {}, title),
+    ...children,
+  );
 }
 
-export function setStatus(el: HTMLElement, text: string, kind: "" | "ok" | "error" | "busy" = "") {
+export function setStatus(
+  el: HTMLElement,
+  text: string,
+  kind: "" | "ok" | "error" | "busy" = "",
+) {
   el.textContent = text;
   el.dataset.kind = kind;
 }
 
 export function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
-  const a = h("a", { href: url, download: filename, style: { display: "none" } });
+  const a = h("a", {
+    href: url,
+    download: filename,
+    style: { display: "none" },
+  });
   document.body.appendChild(a);
   a.click();
   setTimeout(() => {

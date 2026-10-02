@@ -100,7 +100,8 @@ function readZip(buf: Buffer): ZipEntry[] {
   let p = buf.readUInt32LE(eocd + 16);
   const out: ZipEntry[] = [];
   for (let i = 0; i < count; ++i) {
-    if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error("bad central directory");
+    if (buf.readUInt32LE(p) !== 0x02014b50)
+      throw new Error("bad central directory");
     const method = buf.readUInt16LE(p + 10);
     const compSize = buf.readUInt32LE(p + 20);
     const nameLen = buf.readUInt16LE(p + 28);
@@ -116,7 +117,8 @@ function readZip(buf: Buffer): ZipEntry[] {
     const raw = buf.subarray(start, start + compSize);
     const data =
       method === 0 ? raw : method === 8 ? zlib.inflateRawSync(raw) : undefined;
-    if (data === undefined) throw new Error(`unsupported zip method ${method} for ${name}`);
+    if (data === undefined)
+      throw new Error(`unsupported zip method ${method} for ${name}`);
     out.push({ name, data: new Uint8Array(data) });
   }
   return out;
@@ -175,22 +177,36 @@ function writeZip(entries: ZipEntry[]): Buffer {
 
 // -- payload --------------------------------------------------------------------
 
-function walk(dir: string, prefix: string, keep: (rel: string) => boolean): ZipEntry[] {
+function walk(
+  dir: string,
+  prefix: string,
+  keep: (rel: string) => boolean,
+): ZipEntry[] {
   const out: ZipEntry[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.name === "__pycache__" || entry.name === "tests") continue;
     const full = path.join(dir, entry.name);
     const rel = `${prefix}${entry.name}`;
     if (entry.isDirectory()) out.push(...walk(full, `${rel}/`, keep));
-    else if (keep(rel)) out.push({ name: rel, data: new Uint8Array(fs.readFileSync(full)) });
+    else if (keep(rel))
+      out.push({ name: rel, data: new Uint8Array(fs.readFileSync(full)) });
   }
   return out;
 }
 
-async function zarrVectorsEntries(opts: Options): Promise<{ entries: ZipEntry[]; version: string }> {
-  if (opts.zarrVectors !== undefined && fs.statSync(opts.zarrVectors).isDirectory()) {
+async function zarrVectorsEntries(
+  opts: Options,
+): Promise<{ entries: ZipEntry[]; version: string }> {
+  if (
+    opts.zarrVectors !== undefined &&
+    fs.statSync(opts.zarrVectors).isDirectory()
+  ) {
     return {
-      entries: walk(opts.zarrVectors, "zarr_vectors/", (rel) => rel.endsWith(".py") || rel.endsWith(".typed")),
+      entries: walk(
+        opts.zarrVectors,
+        "zarr_vectors/",
+        (rel) => rel.endsWith(".py") || rel.endsWith(".typed"),
+      ),
       version: `local:${opts.zarrVectors}`,
     };
   }
@@ -199,14 +215,20 @@ async function zarrVectorsEntries(opts: Options): Promise<{ entries: ZipEntry[];
     const cache = path.join(opts.out, ".cache");
     wheelPath = path.join(cache, ZARR_VECTORS_WHEEL.name);
     if (!fs.existsSync(wheelPath)) {
-      if (opts.offline) throw new Error(`--offline and no cached ${wheelPath}; pass --zarr-vectors`);
+      if (opts.offline)
+        throw new Error(
+          `--offline and no cached ${wheelPath}; pass --zarr-vectors`,
+        );
       console.log(`downloading ${ZARR_VECTORS_WHEEL.url}`);
       const response = await fetch(ZARR_VECTORS_WHEEL.url);
-      if (!response.ok) throw new Error(`HTTP ${response.status} downloading zarr-vectors`);
+      if (!response.ok)
+        throw new Error(`HTTP ${response.status} downloading zarr-vectors`);
       fs.mkdirSync(cache, { recursive: true });
       fs.writeFileSync(wheelPath, Buffer.from(await response.arrayBuffer()));
     }
-    const digest = createHash("sha256").update(fs.readFileSync(wheelPath)).digest("hex");
+    const digest = createHash("sha256")
+      .update(fs.readFileSync(wheelPath))
+      .digest("hex");
     if (digest !== ZARR_VECTORS_WHEEL.sha256) {
       fs.rmSync(wheelPath);
       throw new Error(`zarr-vectors wheel sha256 mismatch (${digest})`);
@@ -215,24 +237,39 @@ async function zarrVectorsEntries(opts: Options): Promise<{ entries: ZipEntry[];
   const entries = readZip(fs.readFileSync(wheelPath)).filter(
     (e) => !e.name.endsWith(".pyc") && !e.name.includes("__pycache__"),
   );
-  const version = /zarr_vectors-([^-]+)-/.exec(path.basename(wheelPath))?.[1] ?? "?";
+  const version =
+    /zarr_vectors-([^-]+)-/.exec(path.basename(wheelPath))?.[1] ?? "?";
   return { entries, version };
 }
 
-async function buildPayload(opts: Options): Promise<{ zip: Buffer; zarrVectors: string; files: number }> {
+async function buildPayload(
+  opts: Options,
+): Promise<{ zip: Buffer; zarrVectors: string; files: number }> {
   const py = (rel: string) => rel.endsWith(".py") || rel.endsWith("py.typed");
   const entries = [
     ...walk(path.join(NGPY, "python", "ngpy"), "ngpy/", py),
-    ...walk(path.join(NGPY, "python", "vendor", "neuroglancer"), "neuroglancer/", py),
+    ...walk(
+      path.join(NGPY, "python", "vendor", "neuroglancer"),
+      "neuroglancer/",
+      py,
+    ),
   ];
   const zv = await zarrVectorsEntries(opts);
   entries.push(...zv.entries);
-  return { zip: writeZip(entries), zarrVectors: zv.version, files: entries.length };
+  return {
+    zip: writeZip(entries),
+    zarrVectors: zv.version,
+    files: entries.length,
+  };
 }
 
 // -- bundles --------------------------------------------------------------------
 
-async function bundle(entry: string, opts: Options, plugins: esbuild.Plugin[] = []): Promise<string> {
+async function bundle(
+  entry: string,
+  opts: Options,
+  plugins: esbuild.Plugin[] = [],
+): Promise<string> {
   const result = await esbuild.build({
     entryPoints: [entry],
     bundle: true,
@@ -270,8 +307,14 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   fs.mkdirSync(opts.out, { recursive: true });
   const payload = await buildPayload(opts);
-  const worker = await bundle(path.join(NGPY, "src", "python", "worker.ts"), opts);
-  const demo = fs.readFileSync(path.join(NGPY, "examples", "hcp1065_demo.py"), "utf8");
+  const worker = await bundle(
+    path.join(NGPY, "src", "python", "worker.ts"),
+    opts,
+  );
+  const demo = fs.readFileSync(
+    path.join(NGPY, "examples", "hcp1065_demo.py"),
+    "utf8",
+  );
   const buildInfo = {
     version: "0.1.0",
     builtAt: new Date().toISOString(),
@@ -285,7 +328,10 @@ async function main() {
       BUILD_INFO: buildInfo,
     }),
   ]);
-  const css = fs.readFileSync(path.join(NGPY, "src", "ui", "style.css"), "utf8");
+  const css = fs.readFileSync(
+    path.join(NGPY, "src", "ui", "style.css"),
+    "utf8",
+  );
   const html =
     "<!doctype html>\n" +
     '<html lang="en">\n<head>\n<meta charset="utf-8">\n' +
@@ -305,7 +351,7 @@ async function main() {
   console.log(
     `${path.relative(ROOT, outFile)}: ${mb(Buffer.byteLength(html))} ` +
       `(payload zip ${mb(payload.zip.length)}, ${payload.files} files, ` +
-      `zarr-vectors ${payload.zarrVectors}; worker ${mb(worker.length)}; page ${mb(page.length - payload.zip.length * 4 / 3)})`,
+      `zarr-vectors ${payload.zarrVectors}; worker ${mb(worker.length)}; page ${mb(page.length - (payload.zip.length * 4) / 3)})`,
   );
 }
 

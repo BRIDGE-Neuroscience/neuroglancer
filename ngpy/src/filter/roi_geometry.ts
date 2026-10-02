@@ -44,7 +44,10 @@ export interface DimensionScales {
 }
 
 /** Parse a Neuroglancer `dimensions` JSON object (`{name: [scale, unit]}`). */
-export function parseDimensions(dims: any): { names: string[]; scalesM: number[] } {
+export function parseDimensions(dims: any): {
+  names: string[];
+  scalesM: number[];
+} {
   const names: string[] = [];
   const scalesM: number[] = [];
   if (dims && typeof dims === "object") {
@@ -137,7 +140,12 @@ export function shapeToAnnotation(
         pointB: place(shape.upper),
       };
     case "ellipsoid":
-      return { type: "ellipsoid", id, center: place(shape.center), radii: place(shape.radii) };
+      return {
+        type: "ellipsoid",
+        id,
+        center: place(shape.center),
+        radii: place(shape.radii),
+      };
     default:
       return undefined;
   }

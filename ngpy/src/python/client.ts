@@ -37,7 +37,10 @@ export class PythonClient {
   error: string | undefined;
   private worker: Worker | undefined;
   private nextId = 1;
-  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  private pending = new Map<
+    number,
+    { resolve: (v: any) => void; reject: (e: Error) => void }
+  >();
   private readyPromise: Promise<void> | undefined;
 
   constructor(
@@ -45,13 +48,19 @@ export class PythonClient {
     private payload: () => ArrayBuffer,
   ) {}
 
-  start(indexURL: string, pageInfo: { pageUrl: string; viewerUrl: string }): Promise<void> {
+  start(
+    indexURL: string,
+    pageInfo: { pageUrl: string; viewerUrl: string },
+  ): Promise<void> {
     if (this.readyPromise !== undefined) return this.readyPromise;
     this.setStatus("loading");
     const blobUrl = URL.createObjectURL(
       new Blob([this.workerSource], { type: "text/javascript" }),
     );
-    const worker = (this.worker = new Worker(blobUrl, { type: "module", name: "ngpy-pyodide" }));
+    const worker = (this.worker = new Worker(blobUrl, {
+      type: "module",
+      name: "ngpy-pyodide",
+    }));
     this.readyPromise = new Promise<void>((resolve, reject) => {
       worker.addEventListener("message", (event: MessageEvent<FromWorker>) => {
         const msg = event.data;
@@ -107,8 +116,11 @@ export class PythonClient {
     this.worker!.postMessage(msg, transfer);
   }
 
-  private request<T>(msg: WithoutId<Extract<ToWorker, { id: number }>>): Promise<T> {
-    if (this.worker === undefined) return Promise.reject(new Error("Python is not started"));
+  private request<T>(
+    msg: WithoutId<Extract<ToWorker, { id: number }>>,
+  ): Promise<T> {
+    if (this.worker === undefined)
+      return Promise.reject(new Error("Python is not started"));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -117,7 +129,11 @@ export class PythonClient {
   }
 
   /** `ngpy.api.<fn>(...args)`; `args` are already JSON text. */
-  call<T = string>(fn: string, args: string[] = [], promising = false): Promise<T> {
+  call<T = string>(
+    fn: string,
+    args: string[] = [],
+    promising = false,
+  ): Promise<T> {
     return this.request<T>({ type: "call", fn, args, promising });
   }
 

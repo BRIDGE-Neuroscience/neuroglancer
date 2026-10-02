@@ -42,7 +42,11 @@ def test_import_order(first):
         "print('ok')\n"
     )
     out = subprocess.run(
-        [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "ok"

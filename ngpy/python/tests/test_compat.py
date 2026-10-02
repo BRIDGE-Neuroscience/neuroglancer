@@ -20,6 +20,7 @@ under Pyodide; here the shim is forced on and must not change any result.
 
 import numpy as np
 import pytest
+
 from ngpy import compat
 
 
@@ -27,7 +28,9 @@ def test_shim_narrows_repeat_and_bincount_inputs():
     repeats = np.array([2, 0, 3], dtype=np.int64)
     out = compat.SHIM.repeat(np.arange(3, dtype=np.int64), repeats)
     assert out.tolist() == [0, 0, 2, 2, 2]
-    assert compat.SHIM.bincount(np.array([1, 1, 3], dtype=np.int64), minlength=5).tolist() == [0, 2, 0, 1, 0]
+    assert compat.SHIM.bincount(
+        np.array([1, 1, 3], dtype=np.int64), minlength=5
+    ).tolist() == [0, 2, 0, 1, 0]
     assert compat.SHIM.float32 is np.float32  # everything else is numpy
 
 
@@ -35,13 +38,16 @@ def test_forced_shims_keep_store_reads_identical(tmp_path, monkeypatch):
     pytest.importorskip("zarr_vectors.encoding.fragments")
     import asyncio
 
-    from ngpy import zv
     from test_zv_filter import TRACTS
+
+    from ngpy import zv
 
     path = str(tmp_path / "s.zarrvectors")
     from zarr_vectors.types.polylines import write_polylines
 
-    write_polylines(path, TRACTS, chunk_shape=(10.0, 10.0, 10.0), bounds=([0.0] * 3, [40.0] * 3))
+    write_polylines(
+        path, TRACTS, chunk_shape=(10.0, 10.0, 10.0), bounds=([0.0] * 3, [40.0] * 3)
+    )
     import importlib
 
     modules = {name: importlib.import_module(name) for name in compat.AFFECTED_MODULES}

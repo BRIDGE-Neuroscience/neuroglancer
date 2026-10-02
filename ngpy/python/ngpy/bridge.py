@@ -136,8 +136,12 @@ def sanitize_client_state(state: typing.Any) -> typing.Any:
     if isinstance(layers, list) and any(
         isinstance(layer, dict) and layer.get("type") == "new" for layer in layers
     ):
-        kept = [l for l in layers if not (isinstance(l, dict) and l.get("type") == "new")]
-        dropped = {l.get("name") for l in layers if isinstance(l, dict) and l.get("type") == "new"}
+
+        def is_placeholder(layer) -> bool:
+            return isinstance(layer, dict) and layer.get("type") == "new"
+
+        kept = [layer for layer in layers if not is_placeholder(layer)]
+        dropped = {layer.get("name") for layer in layers if is_placeholder(layer)}
         state = dict(state, layers=kept)
         selected = state.get("selectedLayer")
         if isinstance(selected, dict) and selected.get("layer") in dropped:
@@ -228,7 +232,9 @@ class _BridgeMixin:
         """Run ``callback`` on a later turn of the worker's event loop."""
         try:
             import js  # type: ignore[import-not-found]
-            from pyodide.ffi import create_once_callable  # type: ignore[import-not-found]
+            from pyodide.ffi import (
+                create_once_callable,  # type: ignore[import-not-found]
+            )
         except ImportError:
             callback(*args, **kwargs)
             return
