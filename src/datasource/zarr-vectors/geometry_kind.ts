@@ -84,7 +84,7 @@ export interface GeometryKindCapabilities {
    * geometries — those have a well-defined walk direction at every
    * vertex, including endpoints, which we need so that cross-chunk
    * ghost-tangent signs match up across bridge edges (see
-   * `appendGhostVertices`).
+   * `chunk_pipeline.ts`).
    */
   readonly hasWalkOrderTangent: boolean;
   /**
@@ -226,14 +226,6 @@ export const KIND_CAPABILITIES: Record<
   },
 };
 
-/** True iff the geometry has *any* synthesised per-vertex tangent
- *  (regardless of which algorithm produced it).  Drives whether the
- *  shader bridge exposes `prop_tangent()`. */
-export function hasSynthesisedTangent(kind: ZarrVectorsGeometryKind): boolean {
-  const caps = KIND_CAPABILITIES[kind];
-  return caps.hasWalkOrderTangent || caps.hasEdgeAdjacencyTangent;
-}
-
 /**
  * True iff the kind carries the discrete-object model (`object_index/`,
  * `object_attributes/`, per-fragment `segment_id`).  False only for
@@ -243,14 +235,4 @@ export function hasSynthesisedTangent(kind: ZarrVectorsGeometryKind): boolean {
  */
 export function hasObjectModel(kind: ZarrVectorsGeometryKind): boolean {
   return KIND_CAPABILITIES[kind].hasObjectModel;
-}
-
-/** True iff the kind is drawn as unconnected vertices rather than lines. */
-export function isPointGeometry(kind: ZarrVectorsGeometryKind): boolean {
-  return KIND_CAPABILITIES[kind].primitive === "points";
-}
-
-/** True iff the kind's link records bound a surface rather than a curve. */
-export function isSurfaceGeometry(kind: ZarrVectorsGeometryKind): boolean {
-  return KIND_CAPABILITIES[kind].primitive === "triangles";
 }

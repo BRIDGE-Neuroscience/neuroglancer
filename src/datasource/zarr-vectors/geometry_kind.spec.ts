@@ -10,11 +10,16 @@ import {
   DEFAULT_STREAMLINE_FRAGMENT_MAIN,
   KIND_CAPABILITIES,
   hasObjectModel,
-  hasSynthesisedTangent,
-  isPointGeometry,
-  isSurfaceGeometry,
   type ZarrVectorsGeometryKind,
 } from "#src/datasource/zarr-vectors/geometry_kind.js";
+
+const hasSynthesisedTangent = (kind: ZarrVectorsGeometryKind) =>
+  KIND_CAPABILITIES[kind].hasWalkOrderTangent ||
+  KIND_CAPABILITIES[kind].hasEdgeAdjacencyTangent;
+const isPointGeometry = (kind: ZarrVectorsGeometryKind) =>
+  KIND_CAPABILITIES[kind].primitive === "points";
+const isSurfaceGeometry = (kind: ZarrVectorsGeometryKind) =>
+  KIND_CAPABILITIES[kind].primitive === "triangles";
 
 const ALL_KINDS: readonly ZarrVectorsGeometryKind[] = [
   "point_cloud",

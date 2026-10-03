@@ -30,10 +30,7 @@ import {
   linksPath,
 } from "#src/datasource/zarr-vectors/links_paths.js";
 import { resolveDeclaredGeometry } from "#src/datasource/zarr-vectors/store_metadata.js";
-import type {
-  ZarrArray,
-  ZarrArrayRead,
-} from "#src/datasource/zarr-vectors/zarr_array.js";
+import type { ZarrArrayRead } from "#src/datasource/zarr-vectors/zarr_array.js";
 import {
   mapConcurrent,
   parseZarrArrayMetadata,
@@ -754,12 +751,6 @@ async function readLevel(
 }
 
 // -------------------------------------------------------------- store
-
-/** Element type of the vertices array, which must decode to float32 positions. */
-export function verticesElementType(array: ZarrArray): string {
-  const dtype = array.attributes?.dtype ?? "float32";
-  return String(dtype);
-}
 
 export async function openZarrVectorsStore(
   access: ZarrVectorsStoreAccess,
