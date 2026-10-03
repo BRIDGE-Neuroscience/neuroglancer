@@ -24,7 +24,7 @@ import {
   WithParameters,
   withChunkManager,
 } from "#src/chunk_manager/backend.js";
-import { ChunkState } from "#src/chunk_manager/base.js";
+import { ChunkPriorityTier, ChunkState } from "#src/chunk_manager/base.js";
 import type { ZarrVectorsChunkSpecification } from "#src/datasource/zarr-vectors/base.js";
 import {
   ZARR_VECTORS_DENSE_RENDER_LAYER_RPC_ID,
@@ -141,6 +141,13 @@ export class ZarrVectorsGeometryChunkSourceBackend extends WithParameters(
         storeAccess(this.sharedKvStoreContext, storeUrl),
         description,
         level,
+        (position) => {
+          const chunk = this.chunks.get(position.join());
+          return (
+            chunk !== undefined &&
+            chunk.priorityTier !== ChunkPriorityTier.RECENT
+          );
+        },
       );
     }
     return this.pipeline_;

@@ -109,8 +109,9 @@ Read through each array's own `zarr.json` (`zarr_array.ts`):
 
 Meshes: the `meshes` subsource reads level 0 only, through Neuroglancer's
 single-resolution mesh source, one fragment per chunk an object occupies. The
-dense overview draws a mesh store's vertices, since zarr-vectors-py pyramids
-keep no faces above level 0. Faces that span chunks are found by listing
+dense overview draws a mesh store's vertices at every level and reads no
+faces, even where a zarr-vectors-tools pyramid (`zvtools pyramid`) stores
+decimated faces above level 0. Faces that span chunks are found by listing
 `links/0/`; on a server without listing they are missing (with a warning).
 
 Not read yet (reported once in the console):

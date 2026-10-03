@@ -195,6 +195,100 @@ describe("dense chunks", () => {
   });
 });
 
+describe("vertex cell reads", () => {
+  /** Every chunk of a level 0, downloaded by one pipeline. */
+  async function downloadAll(name: string, requested: boolean) {
+    const reads: string[] = [];
+    const base = access(name);
+    const counted = {
+      ...base,
+      read: (path: string, options: any) => {
+        // One entry per cell read: a shard's cells share its path.
+        const range = options?.byteRange;
+        if (
+          path.startsWith("0/vertices/c/") &&
+          !(range && "suffixLength" in range)
+        ) {
+          reads.push(`${path}@${range?.offset ?? ""}`);
+        }
+        return base.read(path, options);
+      },
+    };
+    const store = await openZarrVectorsStore(counted, undefined);
+    // Opening samples a cell to measure attribute widths; count only the pipeline.
+    reads.length = 0;
+    const level = store.levels[0];
+    const pipeline = new LevelPipeline(
+      counted,
+      store.description,
+      level,
+      () => requested,
+    );
+    const { shape, attributes } = level.arrays.vertices;
+    const origin = attributes.chunk_grid_origin ?? [0, 0, 0];
+    let chunks = 0;
+    for (let i = 0; i < shape[0]; ++i) {
+      for (let j = 0; j < shape[1]; ++j) {
+        for (let k = 0; k < shape[2]; ++k) {
+          const chunk = [i + origin[0], j + origin[1], k + origin[2]];
+          if ((await pipeline.download(chunk, signal)) !== undefined) ++chunks;
+        }
+      }
+    }
+    return { reads, chunks };
+  }
+
+  it("fetches each cell once when the view draws its neighbours too", async () => {
+    for (const name of ["poly_raw", "poly_zstd", "poly_zstd_shard"]) {
+      const { reads, chunks } = await downloadAll(name, true);
+      expect(chunks, name).toBeGreaterThan(1);
+      expect(reads.length, name).toBe(new Set(reads).size);
+    }
+  });
+
+  it("reads only the rows it needs of a raw neighbour the view does not draw", async () => {
+    const { reads } = await downloadAll("poly_raw", false);
+    // Whole-cell reads carry no offset; row-range reads of neighbours do.
+    expect(reads.filter((r) => !r.endsWith("@")).length).toBeGreaterThan(0);
+  });
+
+  it("leaves a mesh's faces unread, since the overview draws its vertices", async () => {
+    const reads: string[] = [];
+    const base = access("mesh_raw");
+    const counted = {
+      ...base,
+      read: (path: string, options: any) => {
+        reads.push(path);
+        return base.read(path, options);
+      },
+    };
+    const store = await openZarrVectorsStore(counted, undefined);
+    const pipeline = new LevelPipeline(
+      counted,
+      store.description,
+      store.levels[0],
+    );
+    const data = await pipeline.download([0, 0, 0], signal);
+    expect(data?.numVertices).toBeGreaterThan(0);
+    expect(reads.filter((r) => /^0\/links\/.*\/c\//.test(r))).toEqual([]);
+  });
+
+  it("never takes ghost positions from another store's cells", async () => {
+    // pts_raw has cells at the same keys as skel_raw's neighbours.
+    await downloadAll("pts_raw", true);
+    const store = await open("skel_raw");
+    const pipeline = new LevelPipeline(
+      access("skel_raw"),
+      store.description,
+      store.levels[0],
+    );
+    const data = await pipeline.download([0, 0, 0], signal);
+    // Vertex 4's bridge to its parent in chunk 1.0.0 ends at (20, 12, 4).
+    const ghost = data!.positions.subarray(3 * data!.numOwnVertices);
+    expect(Array.from(ghost)).toEqual([20, 12, 4]);
+  });
+});
+
 describe("object layer", () => {
   it("maps sparse object ids and reads multi-chunk properties", async () => {
     const table = await readObjectTable(access("pts_sparse_ids"), "0");

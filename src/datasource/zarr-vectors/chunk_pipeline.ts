@@ -23,8 +23,12 @@
  * between its last vertex on one side and its first on the other. The chunk
  * owning the link (holding its first endpoint) appends the far endpoint as a
  * "ghost" vertex and draws the bridging edge, so each bridge is drawn once.
- * Ghost positions come from a cache of decoded chunks when possible, else
- * from row-range reads of the neighbour's raw cell (12 bytes per vertex).
+ *
+ * Ghost positions come from the neighbour's vertex cell. Cells are shared
+ * through one cache, so a neighbour the view also draws is fetched once,
+ * whichever needs it first. A neighbour the view does not draw (a slice
+ * view's chunks above and below the plane) is read by row range instead,
+ * when its cell is uncompressed.
  */
 
 import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/base.js";
@@ -74,12 +78,13 @@ const RANGE_GAP_VERTICES = 4096;
 /** Past this many reads into one neighbour, its whole cell is fetched. */
 const MAX_RANGE_READS = 16;
 
-/** Decoded positions of recently seen cells, by level and cell. */
-const positionCache = new AsyncLru<Float32Array | undefined>(
+/** Raw vertex cells, by pipeline and cell, shared by chunks and ghosts. */
+const vertexCells = new AsyncLru<Uint8Array | undefined>(
   Infinity,
   256 * 1024 * 1024,
-  (p) => p?.byteLength ?? 0,
+  (b) => b?.byteLength ?? 0,
 );
+let nextPipelineId = 0;
 
 /**
  * Segment id per fragment of each chunk, by inverting a level's manifests.
@@ -135,11 +140,17 @@ export class LevelPipeline {
   private cells: LevelCells;
   private links: CrossChunkLinks | undefined;
   private owners: Promise<Map<string, BigUint64Array> | undefined> | undefined;
+  private id = nextPipelineId++;
 
+  /**
+   * `isRequested` says whether the view also wants the chunk at a cell, so a
+   * ghost read of it can fetch the whole cell for that chunk to reuse.
+   */
   constructor(
     private access: ZarrVectorsStoreAccess,
     private description: ZarrVectorsGeometryDescription,
     private level: ZarrVectorsLevel,
+    private isRequested: (chunk: readonly number[]) => boolean = () => false,
   ) {
     this.cells = LevelCells.forLevel(access, level, description);
     if (KIND_CAPABILITIES[description.geometryKind].primitive === "lines") {
@@ -150,6 +161,13 @@ export class LevelPipeline {
         warn: warnOnce,
       });
     }
+  }
+
+  /** The raw vertex cell at `chunkKey`, fetched once for every reader. */
+  private vertexCell(chunkKey: string) {
+    return vertexCells.get(`${this.id}|${chunkKey}`, () =>
+      this.cells.readCell("vertices", chunkKey, SHARED_SIGNAL),
+    );
   }
 
   private get vertexType(): ElementType {
@@ -176,7 +194,7 @@ export class LevelPipeline {
     chunk: number[],
     signal: AbortSignal,
   ): Promise<DenseChunkData | undefined> {
-    const { description, level } = this;
+    const { description } = this;
     const chunkKey = chunk.join(".");
     if (!(await this.cells.mayHaveCell("vertices", chunkKey))) return undefined;
     const isLocal = (coords: readonly number[]) =>
@@ -204,12 +222,12 @@ export class LevelPipeline {
     const [decoded, links] = await Promise.all([
       decodeChunk(this.cells, description, chunkKey, signal, {
         relinkedChildren,
+        skipFaces: true,
+        vertices: this.vertexCell(chunkKey),
       }),
       linksPromise,
     ]);
     if (decoded === undefined) return undefined;
-    // Neighbours bridging into this chunk can now skip the read.
-    positionCache.put(`${level.path}|${chunkKey}`, decoded.positions);
 
     let { segmentIds } = decoded;
     if (segmentIds === undefined) {
@@ -274,11 +292,19 @@ export class LevelPipeline {
           }
         }
       };
-      const cacheKey = `${this.level.path}|${key}`;
-      const cached = positionCache.peek(cacheKey);
+      const decodeAll = (bytes: Uint8Array | undefined) =>
+        bytes === undefined
+          ? undefined
+          : decodeFloat32(bytes, type, bytes.byteLength / ELEMENT_BYTES[type]);
+      // The whole cell when it is cached or in flight, or when the view will
+      // draw that chunk anyway; otherwise only the rows needed, if possible.
+      let whole = vertexCells.peek(`${this.id}|${key}`);
+      if (whole === undefined && this.isRequested(key.split(".").map(Number))) {
+        whole = this.vertexCell(key);
+      }
       let done = false;
-      if (cached !== undefined) {
-        takeAll(await cached.catch(() => undefined));
+      if (whole !== undefined) {
+        takeAll(decodeAll(await whole.catch(() => undefined)));
         done = true;
       }
       const spans: [number, number][] = [];
@@ -314,24 +340,7 @@ export class LevelPipeline {
           }
         });
       }
-      if (!done) {
-        takeAll(
-          await positionCache.get(cacheKey, async () => {
-            const bytes = await this.cells.readCell(
-              "vertices",
-              key,
-              SHARED_SIGNAL,
-            );
-            return bytes === undefined
-              ? undefined
-              : decodeFloat32(
-                  bytes,
-                  type,
-                  bytes.byteLength / ELEMENT_BYTES[type],
-                );
-          }),
-        );
-      }
+      if (!done) takeAll(decodeAll(await this.vertexCell(key)));
       for (const i of indices) {
         const p = found.get(ghosts[i].vertex);
         if (p !== undefined) out.set(p, 3 * i);
