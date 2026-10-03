@@ -54,6 +54,7 @@ UI code out of the worker.
 | `backend.ts`                                  | worker  | chunk sources: dense chunks, object skeletons, mesh fragments     |
 | `chunk_pipeline.ts`                           | worker  | one dense chunk: decode, segment ids, bridges to neighbour chunks |
 | `object_reader.ts`                            | worker  | one object, assembled from its manifest's chunks                  |
+| `mesh_lod.ts`                                 | both    | mesh levels of detail: level choice, octree, octant split         |
 | `dense_lod.ts`, `base.ts`, `geometry_kind.ts` | both    | level choice, shared parameters, per-kind drawing rules           |
 | `store.ts`, `objects.ts`                      | both    | root/level metadata; object table and segment properties          |
 | `chunk_decode.ts`                             | worker  | a chunk's vertices, edges, faces and tangents                     |
@@ -91,6 +92,9 @@ Read through each array's own `zarr.json` (`zarr_array.ts`):
 - Codecs: none, zstd, blosc, gzip, zlib, crc32c; `sharding_indexed` with the
   declared index codecs and location. Codecs and sharding may differ per
   array, as `zvtools attach` and `build_pyramid` produce.
+- Byte-range reads of one key issued together (the cells of a shard that
+  several chunks need) are merged into one request when they lie within 8 KiB
+  of each other (`coalesceRangeReads`).
 - `chunk_grid_origin` (negative chunk coordinates), `nonempty_chunks`.
 - Positions in any float or integer dtype; vertex attributes of any numeric
   dtype with 1-4 components (the width is measured when `row_shape` is
@@ -107,12 +111,17 @@ Read through each array's own `zarr.json` (`zarr_array.ts`):
 - Fragments without a stored `segment_id` get their object from the level's
   manifests.
 
-Meshes: the `meshes` subsource reads level 0 only, through Neuroglancer's
-single-resolution mesh source, one fragment per chunk an object occupies. The
-dense overview draws a mesh store's vertices at every level and reads no
-faces, even where a zarr-vectors-tools pyramid (`zvtools pyramid`) stores
-decimated faces above level 0. Faces that span chunks are found by listing
-`links/0/`; on a server without listing they are missing (with a warning).
+Meshes: the `meshes` subsource is a Neuroglancer multiscale mesh
+(`mesh_lod.ts`). Level 0 and each following pyramid level whose chunks are
+twice the previous level's and which stores faces is a level of detail, as
+zarr-vectors-tools builds with `zvtools pyramid --method mesh_decimate
+--coarsen 4,4 --chunk-scale 2,2`; other stores use level 0 alone. An octree
+node is one chunk of a level, and its fragment is the object's faces stored in
+that chunk, including faces that reach into neighbours (found by listing
+`links/0/`; on a server without listing they are missing, with a warning).
+Chunks mix every object's faces, so an object drawn at full resolution reads
+the whole face cell of each chunk it passes through. The dense overview draws
+a mesh store's vertices and reads no faces.
 
 Not read yet (reported once in the console):
 

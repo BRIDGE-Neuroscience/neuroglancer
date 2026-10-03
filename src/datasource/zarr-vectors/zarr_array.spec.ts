@@ -17,6 +17,7 @@
 import { describe, expect, it } from "vitest";
 import { fixtureRead } from "#src/datasource/zarr-vectors/test_fixtures.js";
 import {
+  coalesceRangeReads,
   openZarrArray,
   ShardIndexCache,
   ZarrArrayReader,
@@ -129,5 +130,135 @@ describe("ZarrArrayReader", () => {
   it("returns undefined for cells outside the grid", async () => {
     const reader = await openReader("poly_raw", "0/vertices");
     expect(await reader.readCell([-100, -100, -100])).toBeUndefined();
+  });
+});
+
+describe("coalesceRangeReads", () => {
+  const data = Uint8Array.from({ length: 1 << 20 }, (_, i) => i % 251);
+  function source() {
+    const calls: { path: string; offset: number; length: number }[] = [];
+    const read = async (path: string, options: any) => {
+      const { offset, length } = options.byteRange;
+      calls.push({ path, offset, length });
+      options.signal?.throwIfAborted();
+      return path === "missing"
+        ? undefined
+        : data.slice(offset, offset + length);
+    };
+    return { calls, read };
+  }
+
+  it("merges nearby ranges of one key into one read, each caller keeping its bytes", async () => {
+    const { calls, read } = source();
+    const merged = coalesceRangeReads(read);
+    const ranges = [
+      [5000, 100],
+      [0, 10],
+      [200, 50],
+      [5000, 100],
+    ];
+    const results = await Promise.all(
+      ranges.map(([offset, length]) =>
+        merged("shard", { byteRange: { offset, length } }),
+      ),
+    );
+    expect(calls).toEqual([{ path: "shard", offset: 0, length: 5100 }]);
+    results.forEach((bytes, i) => {
+      const [offset, length] = ranges[i];
+      expect(bytes).toEqual(data.slice(offset, offset + length));
+    });
+    // Copies, so one caller's decoder may take over its buffer.
+    expect(results[0]!.buffer).not.toBe(results[3]!.buffer);
+  });
+
+  it("keeps distant ranges and different keys apart", async () => {
+    const { calls, read } = source();
+    const merged = coalesceRangeReads(read, 1024);
+    await Promise.all([
+      merged("a", { byteRange: { offset: 0, length: 10 } }),
+      merged("a", { byteRange: { offset: 100_000, length: 10 } }),
+      merged("b", { byteRange: { offset: 0, length: 10 } }),
+    ]);
+    expect(calls.length).toBe(3);
+  });
+
+  it("passes whole-object and suffix reads straight through", async () => {
+    const calls: unknown[] = [];
+    const merged = coalesceRangeReads(async (_path, options) => {
+      calls.push(options.byteRange);
+      return new Uint8Array(4);
+    });
+    await merged("a", {});
+    await merged("a", { byteRange: { suffixLength: 4 } });
+    expect(calls).toEqual([undefined, { suffixLength: 4 }]);
+  });
+
+  it("lets one caller abort without failing the others", async () => {
+    const { calls, read } = source();
+    const merged = coalesceRangeReads(read);
+    const controller = new AbortController();
+    const aborted = merged("shard", {
+      signal: controller.signal,
+      byteRange: { offset: 0, length: 10 },
+    });
+    const kept = merged("shard", { byteRange: { offset: 20, length: 10 } });
+    const alsoKept = merged("shard", { byteRange: { offset: 40, length: 10 } });
+    controller.abort();
+    await expect(aborted).rejects.toBeDefined();
+    expect(await kept).toEqual(data.slice(20, 30));
+    expect(await alsoKept).toEqual(data.slice(40, 50));
+    expect(calls).toEqual([{ path: "shard", offset: 20, length: 30 }]);
+  });
+
+  it("reports a missing key to every caller", async () => {
+    const { read } = source();
+    const merged = coalesceRangeReads(read);
+    const results = await Promise.all([
+      merged("missing", { byteRange: { offset: 0, length: 4 } }),
+      merged("missing", { byteRange: { offset: 8, length: 4 } }),
+    ]);
+    expect(results).toEqual([undefined, undefined]);
+  });
+
+  it("reads a sharded array's cells in a few requests when they are wanted together", async () => {
+    for (const store of ["poly_raw_shard", "poly_zstd_shard"]) {
+      const base = fixtureRead(store);
+      let requests = 0;
+      const counted: typeof base = (path, options) => {
+        if (path.startsWith("0/vertices/c/")) ++requests;
+        return base(path, options);
+      };
+      const merged = coalesceRangeReads(counted);
+      const array = await openZarrArray(merged, "0/vertices");
+      const reader = new ZarrArrayReader(array!, merged, new ShardIndexCache());
+      const plain = await openReader(store, "0/vertices");
+      const { shape, origin } = array!;
+      const cells: number[][] = [];
+      for (let i = 0; i < shape[0]; ++i) {
+        for (let j = 0; j < shape[1]; ++j) {
+          for (let k = 0; k < shape[2]; ++k) {
+            cells.push([i + origin[0], j + origin[1], k + origin[2]]);
+          }
+        }
+      }
+      const together = await Promise.all(cells.map((c) => reader.readCell(c)));
+      for (let i = 0; i < cells.length; ++i) {
+        expect(together[i], `${store} ${cells[i]}`).toEqual(
+          await plain.readCell(cells[i]),
+        );
+      }
+      const shards = new Set(
+        cells.map((c) =>
+          c
+            .map((x, d) =>
+              Math.floor((x - origin[d]) / array!.readChunkShape[d] / 2),
+            )
+            .join(),
+        ),
+      ).size;
+      // One index read and one merged cell read per shard.
+      expect(requests, store).toBeLessThanOrEqual(2 * shards);
+      expect(requests, store).toBeLessThan(cells.length);
+    }
   });
 });

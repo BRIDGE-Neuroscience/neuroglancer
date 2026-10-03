@@ -13,6 +13,7 @@ the values the tests compare against.
 import json
 import os
 import shutil
+import subprocess
 import warnings
 
 import numpy as np
@@ -28,6 +29,37 @@ from zarr_vectors.types.points import write_points  # noqa: E402
 from zarr_vectors.types.polylines import write_polylines  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# zarr-vectors-tools' CLI, for the mesh pyramid (`mesh_lod`); that fixture is
+# left as it is when the CLI is not available.
+ZVTOOLS = os.environ.get("ZVTOOLS") or shutil.which("zvtools")
+
+
+def icosphere(subdivisions):
+    """Unit icosphere: (vertices, triangles)."""
+    t = (1 + 5**0.5) / 2
+    v = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t],
+         [0, -1, -t], [0, 1, -t], [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]]
+    f = [[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9],
+         [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8], [3, 9, 4], [3, 4, 2],
+         [3, 2, 6], [3, 6, 8], [3, 8, 9], [4, 9, 5], [2, 4, 11], [6, 2, 10],
+         [8, 6, 7], [9, 8, 1]]
+    verts = [np.array(x, float) / np.linalg.norm(x) for x in v]
+    for _ in range(subdivisions):
+        cache = {}
+
+        def mid(a, b):
+            key = (min(a, b), max(a, b))
+            if key not in cache:
+                m = verts[a] + verts[b]
+                cache[key] = len(verts)
+                verts.append(m / np.linalg.norm(m))
+            return cache[key]
+
+        f = [tri for a, b, c in f for tri in (
+            [a, mid(a, b), mid(c, a)], [b, mid(b, c), mid(a, b)],
+            [c, mid(c, a), mid(b, c)], [mid(a, b), mid(b, c), mid(c, a)])]
+    return np.array(verts), np.array(f)
 
 
 def path(name):
@@ -184,7 +216,37 @@ def main():
         object_ids=skeleton_object_ids,
     )
 
+    # Two spheres, then a zarr-vectors-tools pyramid of decimated surfaces whose
+    # chunks double per level: a multi-resolution mesh.
+    sphere_v, sphere_f = icosphere(3)
+    lod_centers, lod_radii = [(20.0, 20.0, 20.0), (44.0, 26.0, 22.0)], [12.0, 9.0]
+    lod_positions = np.concatenate(
+        [sphere_v * r + c for c, r in zip(lod_centers, lod_radii)]
+    ).astype("float32")
+    lod_faces = np.concatenate([sphere_f, sphere_f + len(sphere_v)])
+    lod_object_ids = np.repeat(np.arange(2, dtype="int64"), len(sphere_v))
+    if ZVTOOLS:
+        write_mesh(
+            fresh("mesh_lod"),
+            lod_positions,
+            lod_faces,
+            chunk_shape=(16.0, 16.0, 16.0),
+            object_ids=lod_object_ids,
+            bounds=([0, 0, 0], [64, 48, 40]),
+            encoding="raw",
+        )
+        subprocess.run(
+            [ZVTOOLS, "pyramid", path("mesh_lod"), "--coarsen", "4,4",
+             "--chunk-scale", "2,2", "--method", "mesh_decimate"],
+            check=True,
+        )
+
     expected = {
+        "mesh_lod": {
+            "positions": lod_positions.tolist(),
+            "faces": lod_faces.tolist(),
+            "object_ids": lod_object_ids.tolist(),
+        },
         "skeleton": {
             "positions": skeleton_positions.tolist(),
             "edges": skeleton_edges.tolist(),

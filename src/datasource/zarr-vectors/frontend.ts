@@ -50,15 +50,24 @@ import {
 import { levelDensities } from "#src/datasource/zarr-vectors/dense_lod.js";
 import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js";
 import {
+  meshGridOffset,
+  meshLevels,
+} from "#src/datasource/zarr-vectors/mesh_lod.js";
+import {
   readObjectTable,
   readSegmentProperties,
 } from "#src/datasource/zarr-vectors/objects.js";
+import type {
+  ZarrVectorsStore,
+  ZarrVectorsStoreAccess,
+} from "#src/datasource/zarr-vectors/store.js";
 import {
   chunkIndexBounds,
   formatAttributesFragment,
   kvStoreAccess,
   openZarrVectorsStore,
   parseAttributesFragment,
+  readJson,
 } from "#src/datasource/zarr-vectors/store.js";
 import { warnOnce } from "#src/datasource/zarr-vectors/util.js";
 import { WithSharedKvStoreContext } from "#src/kvstore/chunk_source_frontend.js";
@@ -68,7 +77,8 @@ import {
   parseUrlSuffix,
   pipelineUrlJoin,
 } from "#src/kvstore/url.js";
-import { MeshSource } from "#src/mesh/frontend.js";
+import { VertexPositionFormat } from "#src/mesh/base.js";
+import { MultiscaleMeshSource } from "#src/mesh/frontend.js";
 import { SegmentPropertyMap } from "#src/segmentation_display_state/property_map.js";
 import type { VertexAttributeInfo } from "#src/skeleton/base.js";
 import { SkeletonSource } from "#src/skeleton/frontend.js";
@@ -92,9 +102,61 @@ export class ZarrVectorsObjectSkeletonSource extends WithParameters(
 }
 
 export class ZarrVectorsMeshSource extends WithParameters(
-  WithSharedKvStoreContext(MeshSource),
+  WithSharedKvStoreContext(MultiscaleMeshSource),
   ZarrVectorsMeshSourceParameters,
 ) {}
+
+/** The `meshes` subsource: every usable level as a level of detail. */
+async function meshSubsource(
+  chunkManager: ChunkManager,
+  context: SharedKvStoreContext,
+  access: ZarrVectorsStoreAccess,
+  storeUrl: string,
+  store: ZarrVectorsStore,
+  warnings: string[],
+  signal: AbortSignal | undefined,
+): Promise<DataSubsourceEntry> {
+  const { levels, unused } = await meshLevels(
+    store.levels,
+    async (level) =>
+      (await readJson(
+        access.read,
+        `${level.path}/links/0/zarr.json`,
+        signal,
+      )) !== undefined,
+  );
+  if (unused > 0) {
+    warnings.push(
+      `${unused} pyramid level(s) not used for meshes: each level of detail ` +
+        "needs faces and chunks twice the previous level's " +
+        "(zvtools pyramid --chunk-scale 2,2)",
+    );
+  }
+  const parameters = Object.assign(new ZarrVectorsMeshSourceParameters(), {
+    storeUrl,
+    description: store.description,
+    levels,
+    gridOffset: meshGridOffset(
+      store.lowerBounds,
+      levels[0].chunkShape,
+      levels.length,
+    ),
+  });
+  return {
+    id: "meshes",
+    default: true,
+    subsource: {
+      mesh: chunkManager.getChunkSource(ZarrVectorsMeshSource, {
+        sharedKvStoreContext: context,
+        parameters,
+        format: {
+          fragmentRelativeVertices: false,
+          vertexPositionFormat: VertexPositionFormat.float32,
+        },
+      }),
+    },
+  };
+}
 
 async function buildDataSource(
   chunkManager: ChunkManager,
@@ -170,19 +232,15 @@ async function buildDataSource(
     const params = { storeUrl, description, level: levels[0] };
     subsources.push(
       KIND_CAPABILITIES[description.geometryKind].primitive === "triangles"
-        ? {
-            id: "meshes",
-            default: true,
-            subsource: {
-              mesh: chunkManager.getChunkSource(ZarrVectorsMeshSource, {
-                sharedKvStoreContext: context,
-                parameters: Object.assign(
-                  new ZarrVectorsMeshSourceParameters(),
-                  params,
-                ),
-              }),
-            },
-          }
+        ? await meshSubsource(
+            chunkManager,
+            context,
+            access,
+            storeUrl,
+            store,
+            warnings,
+            signal,
+          )
         : {
             id: "objects",
             default: true,

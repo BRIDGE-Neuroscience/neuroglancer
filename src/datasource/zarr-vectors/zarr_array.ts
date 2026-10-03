@@ -416,6 +416,131 @@ export class ShardIndexCache extends AsyncLru<BigUint64Array | undefined> {
   }
 }
 
+/** Reads this close together are merged; the bytes between are discarded. */
+const COALESCE_MAX_GAP = 8 * 1024;
+/** A merged read stops growing here, so no cell waits on a huge one. */
+const COALESCE_MAX_LENGTH = 8 * 1024 * 1024;
+
+interface PendingRange {
+  offset: number;
+  length: number;
+  signal: AbortSignal | undefined;
+  resolve: (bytes: Uint8Array | undefined) => void;
+  reject: (reason: unknown) => void;
+}
+
+/**
+ * Merges byte-range reads of one key issued in the same task, such as the
+ * cells of one shard that several chunks ask for at once, into fewer
+ * requests.  Each caller gets its own copy: decoders take over their input's
+ * buffer.
+ */
+export function coalesceRangeReads(
+  read: ZarrArrayRead,
+  maxGap = COALESCE_MAX_GAP,
+  maxLength = COALESCE_MAX_LENGTH,
+): ZarrArrayRead {
+  let pending = new Map<string, PendingRange[]>();
+  let scheduled = false;
+
+  const issue = (path: string, group: PendingRange[]) => {
+    if (group.length === 1) {
+      const [r] = group;
+      read(path, {
+        signal: r.signal,
+        byteRange: { offset: r.offset, length: r.length },
+      }).then(r.resolve, r.reject);
+      return;
+    }
+    const start = group[0].offset;
+    const end = Math.max(...group.map((r) => r.offset + r.length));
+    // Aborted only once every caller has given up.
+    const controller = new AbortController();
+    let live = group.length;
+    for (const r of group) {
+      r.signal?.addEventListener(
+        "abort",
+        () => {
+          if (--live === 0) controller.abort();
+        },
+        { once: true },
+      );
+    }
+    read(path, {
+      signal: controller.signal,
+      byteRange: { offset: start, length: end - start },
+    }).then(
+      (bytes) => {
+        for (const r of group) {
+          const from = r.offset - start;
+          if (bytes === undefined) {
+            r.resolve(undefined);
+          } else if (from + r.length > bytes.length) {
+            r.reject(new Error(`${path}: short range read`));
+          } else {
+            r.resolve(bytes.slice(from, from + r.length));
+          }
+        }
+      },
+      (e) => {
+        for (const r of group) r.reject(e);
+      },
+    );
+  };
+
+  const flush = () => {
+    scheduled = false;
+    const batch = pending;
+    pending = new Map();
+    for (const [path, ranges] of batch) {
+      const live = ranges
+        .filter((r) => !r.signal?.aborted)
+        .sort((a, b) => a.offset - b.offset);
+      let group: PendingRange[] = [];
+      let start = 0;
+      let end = 0;
+      for (const r of live) {
+        const newEnd = Math.max(end, r.offset + r.length);
+        if (
+          group.length > 0 &&
+          r.offset <= end + maxGap &&
+          newEnd - start <= maxLength
+        ) {
+          group.push(r);
+          end = newEnd;
+          continue;
+        }
+        if (group.length > 0) issue(path, group);
+        group = [r];
+        start = r.offset;
+        end = r.offset + r.length;
+      }
+      if (group.length > 0) issue(path, group);
+    }
+  };
+
+  return (path, options) => {
+    const range = options.byteRange;
+    if (range === undefined || "suffixLength" in range) {
+      return read(path, options);
+    }
+    const { signal } = options;
+    signal?.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), {
+        once: true,
+      });
+      let list = pending.get(path);
+      if (list === undefined) pending.set(path, (list = []));
+      list.push({ ...range, signal, resolve, reject });
+      if (!scheduled) {
+        scheduled = true;
+        setTimeout(flush, 0);
+      }
+    });
+  };
+}
+
 const MISSING = 0xffffffffffffffffn;
 
 /** Byte range of one stored chunk inside its key, if it exists. */
