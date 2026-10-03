@@ -37,11 +37,10 @@ import type { DenseChunkData } from "#src/datasource/zarr-vectors/chunk_pipeline
 import { LevelPipeline } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
 import { forEachDenseChunkToLoad } from "#src/datasource/zarr-vectors/dense_lod.js";
 import { ObjectReader } from "#src/datasource/zarr-vectors/object_reader.js";
-import type { ZarrArrayRead } from "#src/datasource/zarr-vectors/zarr_array.js";
-import { ShardIndexCache } from "#src/datasource/zarr-vectors/zarr_array.js";
+import type { ZarrVectorsStoreAccess } from "#src/datasource/zarr-vectors/store.js";
+import { kvStoreAccess } from "#src/datasource/zarr-vectors/store.js";
 import type { SharedKvStoreContextCounterpart } from "#src/kvstore/backend.js";
 import { WithSharedKvStoreContextCounterpart } from "#src/kvstore/backend.js";
-import { joinBaseUrlAndPath } from "#src/kvstore/url.js";
 import type { FragmentChunk, ManifestChunk } from "#src/mesh/backend.js";
 import { assignMeshFragmentData, MeshSource } from "#src/mesh/backend.js";
 import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
@@ -68,51 +67,19 @@ import {
 import type { RPC } from "#src/worker_rpc.js";
 import { registerRPC, registerSharedObject } from "#src/worker_rpc.js";
 
-const shardIndexCaches = new Map<string, ShardIndexCache>();
+const accesses = new Map<string, ZarrVectorsStoreAccess>();
 
-function storeShardIndexes(storeUrl: string) {
-  let cache = shardIndexCaches.get(storeUrl);
-  if (cache === undefined) {
-    cache = new ShardIndexCache();
-    shardIndexCaches.set(storeUrl, cache);
+/** One access (and shard-index cache) per store, shared by its sources. */
+function storeAccess(
+  context: SharedKvStoreContextCounterpart,
+  storeUrl: string,
+): ZarrVectorsStoreAccess {
+  let access = accesses.get(storeUrl);
+  if (access === undefined) {
+    access = kvStoreAccess(context.kvStoreContext, storeUrl);
+    accesses.set(storeUrl, access);
   }
-  return cache;
-}
-
-export function makeStoreRead(
-  context: SharedKvStoreContextCounterpart,
-  storeUrl: string,
-): ZarrArrayRead {
-  return async (path, options) => {
-    const response = await context.kvStoreContext.read(
-      joinBaseUrlAndPath(storeUrl, path),
-      { signal: options.signal, byteRange: options.byteRange },
-    );
-    if (response === undefined) return undefined;
-    return new Uint8Array(await response.response.arrayBuffer());
-  };
-}
-
-export function makeStoreList(
-  context: SharedKvStoreContextCounterpart,
-  storeUrl: string,
-) {
-  return async (path: string) => {
-    const response = await context.kvStoreContext.list(
-      joinBaseUrlAndPath(storeUrl, `${path}/`),
-      { responseKeys: "suffix" },
-    );
-    return response.directories
-      .map((d) => d.replace(/\/$/, ""))
-      .filter((d) => d !== "");
-  };
-}
-
-const warned = new Set<string>();
-function warnOnce(message: string) {
-  if (warned.has(message)) return;
-  warned.add(message);
-  console.warn(`zarr-vectors: ${message}`);
+  return access;
 }
 
 // ------------------------------------------------------------ dense chunks
@@ -170,14 +137,11 @@ export class ZarrVectorsGeometryChunkSourceBackend extends WithParameters(
   private get pipeline() {
     if (this.pipeline_ === undefined) {
       const { storeUrl, description, level } = this.parameters;
-      this.pipeline_ = new LevelPipeline({
-        read: makeStoreRead(this.sharedKvStoreContext, storeUrl),
-        shardIndexes: storeShardIndexes(storeUrl),
-        listDirectories: makeStoreList(this.sharedKvStoreContext, storeUrl),
+      this.pipeline_ = new LevelPipeline(
+        storeAccess(this.sharedKvStoreContext, storeUrl),
         description,
         level,
-        warn: warnOnce,
-      });
+      );
     }
     return this.pipeline_;
   }
@@ -203,14 +167,11 @@ export class ZarrVectorsObjectSkeletonSourceBackend extends WithParameters(
   private get reader() {
     if (this.reader_ === undefined) {
       const { storeUrl, description, level } = this.parameters;
-      this.reader_ = new ObjectReader({
-        read: makeStoreRead(this.sharedKvStoreContext, storeUrl),
-        shardIndexes: storeShardIndexes(storeUrl),
-        listDirectories: makeStoreList(this.sharedKvStoreContext, storeUrl),
+      this.reader_ = new ObjectReader(
+        storeAccess(this.sharedKvStoreContext, storeUrl),
         description,
         level,
-        warn: warnOnce,
-      });
+      );
     }
     return this.reader_;
   }
@@ -232,23 +193,18 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
   private get reader() {
     if (this.reader_ === undefined) {
       const { storeUrl, description, level } = this.parameters;
-      this.reader_ = new ObjectReader({
-        read: makeStoreRead(this.sharedKvStoreContext, storeUrl),
-        shardIndexes: storeShardIndexes(storeUrl),
-        listDirectories: makeStoreList(this.sharedKvStoreContext, storeUrl),
+      this.reader_ = new ObjectReader(
+        storeAccess(this.sharedKvStoreContext, storeUrl),
         description,
         level,
-        warn: warnOnce,
-      });
+      );
     }
     return this.reader_;
   }
 
   async downloadFragmentIds(chunk: ManifestChunk, signal: AbortSignal) {
-    chunk.fragmentIds = await this.reader.meshFragmentKeys(
-      chunk.objectId,
-      signal,
-    );
+    signal.throwIfAborted();
+    chunk.fragmentIds = await this.reader.meshFragmentKeys(chunk.objectId);
   }
 
   async downloadFragment(chunk: FragmentChunk, signal: AbortSignal) {

@@ -127,52 +127,67 @@ describe("decodeLinkCell", () => {
 });
 
 describe("CrossChunkLinks on a zarr-vectors-py store", () => {
-  const make = () =>
+  const make = (listing = true) =>
     new CrossChunkLinks({
       cells: new LevelCells(
-        fixtureRead("poly_raw"),
-        new ShardIndexCache(),
+        { read: fixtureRead("poly_raw"), shardIndexes: new ShardIndexCache() },
         "0",
       ),
-      listDirectories: (path) =>
-        fixtureListDirectories("poly_raw")(`0/${path}`),
+      listDirectories: listing
+        ? (path) => fixtureListDirectories("poly_raw")(`0/${path}`)
+        : undefined,
     });
+  const keys = ["0.1.0", "1.1.0", "0.1.1", "1.1.1", "0.1.2", "1.1.2"];
+  const chunks = keys.map((key) => key.split(".").map(Number));
+  const linkKey = (r: {
+    endpoints: { chunkCoords: number[]; vertexIndex: number }[];
+  }) =>
+    r.endpoints
+      .map((e) => `${e.chunkCoords.join(".")}:${e.vertexIndex}`)
+      .join("|");
 
   it("finds every cross-chunk link exactly once across owning chunks", async () => {
     const links = make();
     const discovery = await links.discover();
     expect(discovery?.arrays.length).toBe(2);
-    const keys = ["0.1.0", "1.1.0", "0.1.1", "1.1.1", "0.1.2", "1.1.2"];
     let total = 0;
-    for (const key of keys) {
-      const table = await links.linksOwnedBy(
-        key.split(".").map(Number),
-        new AbortController().signal,
-      );
-      for (const record of table!.records) {
+    for (const chunk of chunks) {
+      const records = await links.linksOwnedBy(chunk);
+      for (const record of records) {
         const [a, b] = record.endpoints;
+        expect(record.endpoints.map((e) => e.chunkCoords)).toContainEqual(
+          chunk,
+        );
         const delta = a.chunkCoords.map((c, d) =>
           Math.abs(c - b.chunkCoords[d]),
         );
         expect(delta.reduce((x, y) => x + y, 0)).toBe(1);
       }
-      total += table!.records.length;
+      total += records.length;
     }
     // The family group records how many links the writer stored.
     expect(total).toBe(5);
   });
 
-  it("survives an aborted first request", async () => {
+  it("finds each link from both of its chunks", async () => {
     const links = make();
-    const controller = new AbortController();
-    controller.abort();
-    await links
-      .linksOwnedBy([0, 1, 0], controller.signal)
-      .catch(() => undefined);
-    const table = await links.linksOwnedBy(
-      [0, 1, 0],
-      new AbortController().signal,
-    );
-    expect(table).toBeDefined();
+    const seen = new Map<string, number>();
+    for (const chunk of chunks) {
+      for (const record of await links.linksTouching(chunk)) {
+        seen.set(linkKey(record), (seen.get(linkKey(record)) ?? 0) + 1);
+      }
+    }
+    expect(seen.size).toBe(5);
+    for (const count of seen.values()) expect(count).toBe(2);
+  });
+
+  it("finds the same links by probing neighbours when listing is unsupported", async () => {
+    const listed = make(true);
+    const probed = make(false);
+    for (const chunk of chunks) {
+      const a = (await listed.linksOwnedBy(chunk)).map(linkKey).sort();
+      const b = (await probed.linksOwnedBy(chunk)).map(linkKey).sort();
+      expect(b).toEqual(a);
+    }
   });
 });

@@ -35,13 +35,11 @@ import { mat3, mat3FromMat4, prod3 } from "#src/util/geom.js";
 const tempMat3 = mat3.create();
 
 /**
- * Volume of a view's frustum.  Kept here rather than imported because its
- * name differs between Neuroglancer versions (`getViewFrustrumVolume`, later
- * `getViewFrustumVolume`).
+ * Volume of a view frustum.  Neuroglancer's helper was renamed
+ * (`getViewFrustrumVolume`, later `getViewFrustumVolume`), so a copy lives here.
  */
 function viewFrustumVolume(projectionMat: mat4) {
   if (projectionMat[15] === 1) {
-    // Orthographic.
     return (
       (2 / Math.abs(projectionMat[10])) *
       (2 / Math.abs(projectionMat[0])) *

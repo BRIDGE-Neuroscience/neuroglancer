@@ -22,6 +22,7 @@ warnings.filterwarnings("ignore")
 import zarr_vectors.core.arrays as zv_arrays  # noqa: E402
 from zarr_vectors.constants import FORMAT_VERSION  # noqa: E402
 from zarr_vectors.multiresolution.coarsen import build_pyramid  # noqa: E402
+from zarr_vectors.types.graphs import write_graph  # noqa: E402
 from zarr_vectors.types.meshes import write_mesh  # noqa: E402
 from zarr_vectors.types.points import write_points  # noqa: E402
 from zarr_vectors.types.polylines import write_polylines  # noqa: E402
@@ -155,7 +156,40 @@ def main():
         encoding="raw",
     )
 
+    # Two branching trees.  Tree 0 leaves chunk (0,0,0) and comes back, so
+    # vertex 4 sits mid-fragment there with its parent in chunk (1,0,0): the
+    # cross-chunk link must replace the parent the row order implies.  Tree 1
+    # is not the first root, so the writer leaves it out of depth-first order.
+    skeleton_positions = np.array(
+        [
+            [4, 4, 4], [12, 4, 4], [20, 4, 4], [20, 12, 4],
+            [12, 12, 4], [4, 12, 4], [12, 8, 8], [24, 4, 10],
+            [4, 4, 20], [4, 4, 28], [4, 12, 28], [4, 20, 28], [12, 12, 20],
+        ],
+        dtype="float32",
+    )
+    # [child, parent]
+    skeleton_edges = np.array(
+        [[1, 0], [2, 1], [3, 2], [4, 3], [5, 4], [6, 1], [7, 2],
+         [9, 8], [10, 9], [11, 10], [12, 9]],
+        dtype="int64",
+    )
+    skeleton_object_ids = np.array([0] * 8 + [1] * 5, dtype="int64")
+    write_graph(
+        fresh("skel_raw"),
+        skeleton_positions,
+        skeleton_edges,
+        chunk_shape=chunk_shape,
+        kind="skeleton",
+        object_ids=skeleton_object_ids,
+    )
+
     expected = {
+        "skeleton": {
+            "positions": skeleton_positions.tolist(),
+            "edges": skeleton_edges.tolist(),
+            "object_ids": skeleton_object_ids.tolist(),
+        },
         "generator": {
             "format_version": FORMAT_VERSION,
         },

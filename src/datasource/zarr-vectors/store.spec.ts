@@ -21,14 +21,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
 import { LevelPipeline } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
 import { ObjectReader } from "#src/datasource/zarr-vectors/object_reader.js";
 import {
   readObjectTable,
   readSegmentProperties,
 } from "#src/datasource/zarr-vectors/objects.js";
-import type { ZarrVectorsStore } from "#src/datasource/zarr-vectors/store.js";
 import {
   openZarrVectorsStore,
   safeAttributeId,
@@ -51,38 +49,19 @@ function access(store: string) {
 }
 
 async function open(store: string, attributes?: string[]) {
-  return openZarrVectorsStore(access(store), store, attributes);
+  return openZarrVectorsStore(access(store), attributes);
 }
 
-function description(store: ZarrVectorsStore): ZarrVectorsGeometryDescription {
-  return {
-    rank: store.rank,
-    geometryKind: store.geometryKind,
-    linksConvention: store.linksConvention,
-    linkWidth: store.linkWidth,
-    linkedSkeletonLayout: store.linkedSkeletonLayout,
-    attributes: store.attributes,
-    vertexIdAttribute: store.vertexIdAttribute,
-    hasObjects: store.hasObjects,
-  };
-}
-
-function objectReader(name: string, store: ZarrVectorsStore) {
-  const a = access(name);
-  return new ObjectReader({
-    ...a,
-    description: description(store),
-    level: store.levels[0],
-    warn: () => {},
-  });
+async function objectReader(name: string) {
+  const store = await open(name);
+  return new ObjectReader(access(name), store.description, store.levels[0]);
 }
 
 const signal = new AbortController().signal;
 
 /** Every polyline read back per object, as flat [x,y,z,...] in walk order. */
 async function readAllPolylines(name: string) {
-  const store = await open(name);
-  const reader = objectReader(name, store);
+  const reader = await objectReader(name);
   const out: number[][] = [];
   for (let id = 0; id < expected.polylines.length; ++id) {
     const skeleton = await reader.readSkeleton(BigInt(id), signal);
@@ -126,16 +105,16 @@ function expectSamePolylines(actual: number[][]) {
 describe("openZarrVectorsStore", () => {
   it("reads a raw polyline store", async () => {
     const store = await open("poly_raw");
-    expect(store.geometryKind).toBe("streamline");
+    expect(store.description.geometryKind).toBe("streamline");
     expect(store.levels.length).toBe(1);
-    expect(store.attributes.map((a) => [a.name, a.components])).toEqual([
-      ["fa", 1],
-    ]);
+    expect(
+      store.description.attributes.map((a) => [a.name, a.components]),
+    ).toEqual([["fa", 1]]);
   });
 
   it("reads multi-column attributes as vectors", async () => {
     const store = await open("poly_mc");
-    expect(store.attributes).toEqual([
+    expect(store.description.attributes).toEqual([
       expect.objectContaining({ name: "rgb", components: 3 }),
     ]);
   });
@@ -173,12 +152,11 @@ describe("dense chunks", () => {
   it("bridge every curve across chunk faces with global ids", async () => {
     for (const name of ["poly_raw", "poly_zstd_shard"]) {
       const store = await open(name);
-      const pipeline = new LevelPipeline({
-        ...access(name),
-        description: description(store),
-        level: store.levels[0],
-        warn: () => {},
-      });
+      const pipeline = new LevelPipeline(
+        access(name),
+        store.description,
+        store.levels[0],
+      );
       const vertices = store.levels[0].arrays.vertices;
       const origin = vertices.attributes.chunk_grid_origin;
       const shape = vertices.shape;
@@ -250,5 +228,86 @@ describe("object layer", () => {
     expect(group.values.map((v: string) => v.charCodeAt(0))).toEqual([
       0, 0, 0, 1, 1, 1,
     ]);
+  });
+});
+
+describe("skeletons", () => {
+  const {
+    positions,
+    edges,
+    object_ids: objectIds,
+  } = expected.skeleton as {
+    positions: number[][];
+    edges: number[][];
+    object_ids: number[];
+  };
+  const key = (p: ArrayLike<number>) =>
+    Array.from(p, (v) => v.toFixed(3)).join(",");
+  const edgeKey = (a: ArrayLike<number>, b: ArrayLike<number>) =>
+    [key(a), key(b)].sort().join("|");
+  const expectedEdges = (id?: number) =>
+    edges
+      .filter(([child]) => id === undefined || objectIds[child] === id)
+      .map(([child, parent]) => edgeKey(positions[child], positions[parent]))
+      .sort();
+  const at = (p: Float32Array, v: number) => p.subarray(3 * v, 3 * v + 3);
+
+  it("are detected as the linked layout", async () => {
+    const store = await open("skel_raw");
+    expect(store.description.geometryKind).toBe("skeleton");
+    expect(store.description.linksConvention).toBe(
+      "implicit_sequential_with_branches",
+    );
+    expect(store.description.skeletonLayout).toBe("linked");
+  });
+
+  it("read per object with exactly the writer's edges", async () => {
+    const reader = await objectReader("skel_raw");
+    for (const id of [0, 1]) {
+      const skeleton = await reader.readSkeleton(BigInt(id), signal);
+      const got: string[] = [];
+      for (let i = 0; i < skeleton.edges.length; i += 2) {
+        got.push(
+          edgeKey(
+            at(skeleton.positions, skeleton.edges[i]),
+            at(skeleton.positions, skeleton.edges[i + 1]),
+          ),
+        );
+      }
+      expect(got.sort(), `object ${id}`).toEqual(expectedEdges(id));
+    }
+  });
+
+  it("draw every edge once across dense chunks, with no chords", async () => {
+    const store = await open("skel_raw");
+    const pipeline = new LevelPipeline(
+      access("skel_raw"),
+      store.description,
+      store.levels[0],
+    );
+    const got: string[] = [];
+    const ids = new Map<string, number>();
+    for (const chunk of [
+      [0, 0, 0],
+      [1, 0, 0],
+      [0, 0, 1],
+      [0, 1, 1],
+    ]) {
+      const data = await pipeline.download(chunk, signal);
+      expect(data, chunk.join(".")).toBeDefined();
+      for (let v = 0; v < data!.numOwnVertices; ++v) {
+        ids.set(key(at(data!.positions, v)), data!.segmentIds[2 * v]);
+      }
+      for (let i = 0; i < data!.edges.length; i += 2) {
+        got.push(
+          edgeKey(
+            at(data!.positions, data!.edges[i]),
+            at(data!.positions, data!.edges[i + 1]),
+          ),
+        );
+      }
+    }
+    expect(got.sort()).toEqual(expectedEdges());
+    positions.forEach((p, v) => expect(ids.get(key(p))).toBe(objectIds[v]));
   });
 });
