@@ -28,7 +28,8 @@ export function warnOnce(message: string) {
 /**
  * Least-recently-used cache of promises.  Concurrent requests for one key
  * share a load; a load that fails is forgotten so the next request retries.
- * Bounded by entry count and, when `sizeOf` is given, by total size.
+ * Bounded by entry count and, when `sizeOf` is given, by total size; loads
+ * still in flight are never evicted, so they stay shared.
  */
 export class AsyncLru<T> {
   private entries = new Map<string, Promise<T>>();
@@ -57,10 +58,8 @@ export class AsyncLru<T> {
     this.entries.set(key, promise);
     promise.then(
       (value) => {
-        if (this.entries.get(key) !== promise || this.sizeOf === undefined) {
-          return;
-        }
-        const size = this.sizeOf(value);
+        if (this.entries.get(key) !== promise) return;
+        const size = this.sizeOf?.(value) ?? 0;
         this.sizes.set(key, size);
         this.totalSize += size;
         this.evict();
@@ -85,11 +84,15 @@ export class AsyncLru<T> {
   }
 
   private evict() {
-    while (
-      this.entries.size > 1 &&
-      (this.entries.size > this.maxEntries || this.totalSize > this.maxSize)
-    ) {
-      this.delete(this.entries.keys().next().value!);
+    // Oldest first; `sizes` holds exactly the settled entries.
+    for (const key of this.entries.keys()) {
+      if (
+        this.entries.size <= 1 ||
+        (this.entries.size <= this.maxEntries && this.totalSize <= this.maxSize)
+      ) {
+        return;
+      }
+      if (this.sizes.has(key)) this.delete(key);
     }
   }
 }

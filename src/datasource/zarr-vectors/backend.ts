@@ -36,13 +36,24 @@ import {
 import type { DenseChunkData } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
 import { LevelPipeline } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
 import { forEachDenseChunkToLoad } from "#src/datasource/zarr-vectors/dense_lod.js";
+import {
+  buildMeshOctree,
+  partitionMeshFragment,
+} from "#src/datasource/zarr-vectors/mesh_lod.js";
 import { ObjectReader } from "#src/datasource/zarr-vectors/object_reader.js";
 import type { ZarrVectorsStoreAccess } from "#src/datasource/zarr-vectors/store.js";
 import { kvStoreAccess } from "#src/datasource/zarr-vectors/store.js";
 import type { SharedKvStoreContextCounterpart } from "#src/kvstore/backend.js";
 import { WithSharedKvStoreContextCounterpart } from "#src/kvstore/backend.js";
-import type { FragmentChunk, ManifestChunk } from "#src/mesh/backend.js";
-import { assignMeshFragmentData, MeshSource } from "#src/mesh/backend.js";
+import type {
+  MultiscaleFragmentChunk,
+  MultiscaleManifestChunk,
+} from "#src/mesh/backend.js";
+import {
+  assignMultiscaleMeshFragmentData,
+  MultiscaleMeshSource,
+} from "#src/mesh/backend.js";
+import { VertexPositionFormat } from "#src/mesh/base.js";
 import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
 import { validateDisplayDimensionRenderInfoProperty } from "#src/navigation_state.js";
 import type {
@@ -60,6 +71,7 @@ import {
   SliceViewChunkSourceBackend,
 } from "#src/sliceview/backend.js";
 import type { TransformedSource } from "#src/sliceview/base.js";
+import { vec3 } from "#src/util/geom.js";
 import {
   getBasePriority,
   getPriorityTier,
@@ -193,41 +205,130 @@ export class ZarrVectorsObjectSkeletonSourceBackend extends WithParameters(
 
 @registerSharedObject()
 export class ZarrVectorsMeshSourceBackend extends WithParameters(
-  WithSharedKvStoreContextCounterpart(MeshSource),
+  WithSharedKvStoreContextCounterpart(MultiscaleMeshSource),
   ZarrVectorsMeshSourceParameters,
 ) {
-  private reader_: ObjectReader | undefined;
-  private get reader() {
-    if (this.reader_ === undefined) {
-      const { storeUrl, description, level } = this.parameters;
-      this.reader_ = new ObjectReader(
-        storeAccess(this.sharedKvStoreContext, storeUrl),
-        description,
-        level,
+  private readers_: ObjectReader[] | undefined;
+  private scales: Promise<Float32Array> | undefined;
+
+  /** One reader per level of detail. */
+  private get readers() {
+    if (this.readers_ === undefined) {
+      const { storeUrl, description, levels } = this.parameters;
+      const access = storeAccess(this.sharedKvStoreContext, storeUrl);
+      this.readers_ = levels.map(
+        (level) => new ObjectReader(access, description, level),
       );
     }
-    return this.reader_;
+    return this.readers_;
   }
 
-  async downloadFragmentIds(chunk: ManifestChunk, signal: AbortSignal) {
+  private get baseChunk() {
+    return this.parameters.levels[0].chunkShape;
+  }
+
+  private get gridOrigin() {
+    const { gridOffset } = this.parameters;
+    return this.baseChunk.map((c, d) => -gridOffset[d] * c);
+  }
+
+  /**
+   * Each level of detail's typical edge length: Neuroglancer draws the
+   * coarsest level whose edges are about a pixel (times the mesh resolution
+   * setting). Measured on the coarsest level, whose chunks every view loads
+   * first; finer levels scale with the square root of their vertex counts.
+   */
+  private lodScales() {
+    if (this.scales === undefined) {
+      const promise = (async () => {
+        const { levels } = this.parameters;
+        const top = levels.length - 1;
+        const measured = await this.readers[top]
+          .meanEdgeLength()
+          .catch(() => undefined);
+        const topEdge =
+          measured ?? (Math.min(...this.baseChunk) * 2 ** top) / 64;
+        const topCount = levels[top].vertexCount;
+        const out = levels.map(({ vertexCount }, lod) =>
+          vertexCount && topCount
+            ? topEdge * Math.sqrt(topCount / vertexCount)
+            : topEdge * 2 ** (lod - top),
+        );
+        for (let lod = 1; lod < out.length; ++lod) {
+          out[lod] = Math.max(out[lod], out[lod - 1]);
+        }
+        return Float32Array.from(out);
+      })();
+      this.scales = promise;
+      promise.catch(() => {
+        if (this.scales === promise) this.scales = undefined;
+      });
+    }
+    return this.scales;
+  }
+
+  async download(chunk: MultiscaleManifestChunk, signal: AbortSignal) {
+    const { gridOffset } = this.parameters;
+    const base = this.baseChunk;
+    const origin = this.gridOrigin;
+    const perLod = await Promise.all(
+      this.readers.map((r) => r.chunksOf(chunk.objectId)),
+    );
+    const scales = await this.lodScales();
     signal.throwIfAborted();
-    chunk.fragmentIds = await this.reader.meshFragmentKeys(chunk.objectId);
+    const nodes = perLod.map((coords, lod) =>
+      coords.map((c) => c.map((x, d) => x + gridOffset[d] / 2 ** lod)),
+    );
+    const { octree, numLods } = buildMeshOctree(nodes);
+    const lodScales = new Float32Array(numLods);
+    lodScales.set(scales.subarray(0, numLods));
+    const lower = [Infinity, Infinity, Infinity];
+    const upper = [-Infinity, -Infinity, -Infinity];
+    nodes.forEach((coords, lod) => {
+      for (const c of coords) {
+        for (let d = 0; d < 3; ++d) {
+          const size = 2 ** lod * base[d];
+          lower[d] = Math.min(lower[d], c[d] * size + origin[d]);
+          upper[d] = Math.max(upper[d], (c[d] + 1) * size + origin[d]);
+        }
+      }
+    });
+    if (!Number.isFinite(lower[0])) (lower.fill(0), upper.fill(0));
+    chunk.manifest = {
+      chunkShape: vec3.fromValues(base[0], base[1], base[2]),
+      chunkGridSpatialOrigin: vec3.fromValues(origin[0], origin[1], origin[2]),
+      clipLowerBound: vec3.fromValues(lower[0], lower[1], lower[2]),
+      clipUpperBound: vec3.fromValues(upper[0], upper[1], upper[2]),
+      octree,
+      lodScales,
+      vertexOffsets: new Float32Array(numLods * 3),
+    };
   }
 
-  async downloadFragment(chunk: FragmentChunk, signal: AbortSignal) {
-    const mesh = await this.reader.readMeshFragment(
-      chunk.manifestChunk!.objectId,
-      chunk.fragmentId!,
+  async downloadFragment(chunk: MultiscaleFragmentChunk, signal: AbortSignal) {
+    const manifestChunk = chunk.manifestChunk!;
+    const { octree } = manifestChunk.manifest!;
+    const { lod, chunkIndex: row } = chunk;
+    const { gridOffset } = this.parameters;
+    const origin = this.gridOrigin;
+    const grid = [0, 1, 2].map((d) => octree[row * 5 + d]);
+    const size = this.baseChunk.map((c) => c * 2 ** lod);
+    const { positions, indices } = await this.readers[lod].readMeshNode(
+      manifestChunk.objectId,
+      grid.map((x, d) => x - gridOffset[d] / 2 ** lod),
       signal,
     );
-    assignMeshFragmentData(chunk, {
-      vertexPositions: mesh.positions,
-      indices: mesh.indices,
-    });
-  }
-
-  download(chunk: ManifestChunk, signal: AbortSignal) {
-    return this.downloadFragmentIds(chunk, signal);
+    assignMultiscaleMeshFragmentData(
+      chunk,
+      partitionMeshFragment(
+        positions,
+        indices,
+        grid.map((x, d) => x * size[d] + origin[d]),
+        size,
+        lod > 0,
+      ),
+      VertexPositionFormat.float32,
+    );
   }
 }
 

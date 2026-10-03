@@ -1,0 +1,25 @@
+{
+  "attributes": {
+    "zarr_vectors_level": {
+      "level": 1,
+      "object_sparsity": 1.0,
+      "vertex_count": 324,
+      "coarsening_method": "mesh_quadric_collapse",
+      "parent_level": 0,
+      "arrays_present": [
+        "vertices",
+        "links",
+        "object_index"
+      ],
+      "chunk_shape": [
+        32.0,
+        32.0,
+        32.0
+      ],
+      "preserves_object_ids": true,
+      "inherited_num_objects": 2
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

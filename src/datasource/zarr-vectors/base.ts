@@ -59,9 +59,17 @@ export class ZarrVectorsObjectSkeletonSourceParameters extends ZarrVectorsSource
   static RPC_ID = "zarr-vectors/ObjectSkeletonSource";
 }
 
-/** Whole objects at the finest level, as Neuroglancer meshes. */
-export class ZarrVectorsMeshSourceParameters extends ZarrVectorsSourceParameters {
+/**
+ * Whole objects as Neuroglancer multiscale meshes: level of detail `i` is
+ * `levels[i]`, whose chunks are `2 ** i` times level 0's (`mesh_lod.ts`).
+ */
+export class ZarrVectorsMeshSourceParameters {
   static RPC_ID = "zarr-vectors/MeshSource";
+  storeUrl!: string;
+  description!: ZarrVectorsGeometryDescription;
+  levels!: ZarrVectorsLevel[];
+  /** Base chunks added to every octree coordinate (`meshGridOffset`). */
+  gridOffset!: number[];
 }
 
 /** A level's chunk grid, as Neuroglancer's slice-view machinery sees it. */
