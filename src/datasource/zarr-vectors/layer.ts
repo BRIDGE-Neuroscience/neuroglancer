@@ -33,7 +33,7 @@ import {
   ZarrVectorsMultiscaleGeometrySource,
 } from "#src/datasource/zarr-vectors/dense_frontend.js";
 import {
-  DEFAULT_STREAMLINE_FRAGMENT_MAIN,
+  DIRECTION_SHADER,
   KIND_CAPABILITIES,
 } from "#src/datasource/zarr-vectors/geometry_kind.js";
 import {
@@ -76,8 +76,9 @@ export class ZarrVectorsSegmentationUserLayer extends SegmentationUserLayer {
     let directionDefault = dense.length > 0;
     for (const loadedSubsource of dense) {
       const source = denseSource(loadedSubsource)!;
-      const caps = KIND_CAPABILITIES[source.description.geometryKind];
-      if (caps.defaultFragmentMain !== DEFAULT_STREAMLINE_FRAGMENT_MAIN) {
+      if (
+        !KIND_CAPABILITIES[source.description.geometryKind].directionDefault
+      ) {
         directionDefault = false;
       }
       loadedSubsource.activate(() => {
@@ -115,9 +116,9 @@ export class ZarrVectorsSegmentationUserLayer extends SegmentationUserLayer {
   private adoptDirectionShader() {
     const { shader } = this.displayState.skeletonRenderingOptions;
     if (shader.value !== shader.defaultValue) return;
-    if (shader.value === DEFAULT_STREAMLINE_FRAGMENT_MAIN) return;
-    shader.defaultValue = DEFAULT_STREAMLINE_FRAGMENT_MAIN;
-    shader.value = DEFAULT_STREAMLINE_FRAGMENT_MAIN;
+    if (shader.value === DIRECTION_SHADER) return;
+    shader.defaultValue = DIRECTION_SHADER;
+    shader.value = DIRECTION_SHADER;
   }
 }
 

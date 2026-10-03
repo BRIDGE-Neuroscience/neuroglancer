@@ -59,6 +59,12 @@ import {
   parseCodecChainSpec,
   registerCodec as registerResolveCodec,
 } from "#src/datasource/zarr/codec/resolve.js";
+import type { ElementType } from "#src/datasource/zarr-vectors/dtype.js";
+import {
+  ELEMENT_BYTES,
+  isElementType,
+} from "#src/datasource/zarr-vectors/dtype.js";
+import { AsyncLru, mapConcurrent } from "#src/datasource/zarr-vectors/util.js";
 import type { ByteRangeRequest } from "#src/kvstore/index.js";
 import { DataType } from "#src/util/data_type.js";
 
@@ -123,35 +129,7 @@ export type ZarrArrayRead = (
  * Element type of an array.  Fixed-size dtypes are interpreted by callers
  * from `elementBytes`; `vlen` marks variable-length bytes or strings.
  */
-export type ZarrElementType =
-  | "bool"
-  | "int8"
-  | "uint8"
-  | "int16"
-  | "uint16"
-  | "int32"
-  | "uint32"
-  | "int64"
-  | "uint64"
-  | "float16"
-  | "float32"
-  | "float64"
-  | "vlen";
-
-const ELEMENT_BYTES: Record<Exclude<ZarrElementType, "vlen">, number> = {
-  bool: 1,
-  int8: 1,
-  uint8: 1,
-  int16: 2,
-  uint16: 2,
-  int32: 4,
-  uint32: 4,
-  int64: 8,
-  uint64: 8,
-  float16: 2,
-  float32: 4,
-  float64: 8,
-};
+export type ZarrElementType = ElementType | "vlen";
 
 function parseElementType(dataType: unknown): ZarrElementType {
   if (typeof dataType !== "string") {
@@ -164,7 +142,7 @@ function parseElementType(dataType: unknown): ZarrElementType {
     case "variable_length_utf8":
       return "vlen";
   }
-  if (dataType in ELEMENT_BYTES) return dataType as ZarrElementType;
+  if (isElementType(dataType)) return dataType;
   throw new Error(`unsupported zarr data_type ${JSON.stringify(dataType)}`);
 }
 
@@ -429,34 +407,12 @@ export async function openZarrArray(
 }
 
 /**
- * Bounded cache of decoded shard indexes, shared by every array of a store.
- * An index is 16 bytes per inner chunk (1 KiB for a 4x4x4 shard).
+ * Decoded shard indexes, shared by every array of a store. An index is 16
+ * bytes per inner chunk (1 KiB for a 4x4x4 shard).
  */
-export class ShardIndexCache {
-  private entries = new Map<string, Promise<BigUint64Array | undefined>>();
-  constructor(private maxEntries = 4096) {}
-
-  get(
-    key: string,
-    load: () => Promise<BigUint64Array | undefined>,
-  ): Promise<BigUint64Array | undefined> {
-    const existing = this.entries.get(key);
-    if (existing !== undefined) {
-      this.entries.delete(key);
-      this.entries.set(key, existing);
-      return existing;
-    }
-    const promise = load();
-    this.entries.set(key, promise);
-    // A failed or aborted load must not poison later reads.
-    promise.catch(() => {
-      if (this.entries.get(key) === promise) this.entries.delete(key);
-    });
-    if (this.entries.size > this.maxEntries) {
-      const oldest = this.entries.keys().next().value!;
-      this.entries.delete(oldest);
-    }
-    return promise;
+export class ShardIndexCache extends AsyncLru<BigUint64Array | undefined> {
+  constructor() {
+    super(4096);
   }
 }
 
@@ -881,22 +837,4 @@ function swapEndian(bytes: Uint8Array, width: number) {
       bytes[b] = t;
     }
   }
-}
-
-/** Runs `fn` over `items` with at most `limit` in flight. */
-export async function mapConcurrent<T>(
-  items: readonly T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<void>,
-): Promise<void> {
-  let next = 0;
-  const workers: Promise<void>[] = [];
-  const run = async () => {
-    while (next < items.length) {
-      const i = next++;
-      await fn(items[i], i);
-    }
-  };
-  for (let i = 0; i < Math.min(limit, items.length); ++i) workers.push(run());
-  await Promise.all(workers);
 }

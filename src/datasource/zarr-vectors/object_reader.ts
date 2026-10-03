@@ -17,18 +17,17 @@
 /**
  * @file Whole objects at full resolution, for Neuroglancer's own skeleton and
  * mesh layers: segment id -> row -> manifest -> the fragments it owns in each
- * chunk.
- *
- * Chunks are decoded once and shared between the objects that pass through
- * them (a bundle of tracts shares most of its chunks), and manifest chunks
- * are decoded once and shared between rows.
+ * chunk. Decoded chunks and manifest chunks are shared between the objects
+ * that pass through them.
  */
 
-import { ChunkCoalescingCache } from "#src/datasource/zarr-vectors/chunk_coalescing_cache.js";
-import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
-import { hasTangentAttribute } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
-import type { SkeletonChunk as DecodedChunk } from "#src/datasource/zarr-vectors/geometry_chunk.js";
-import { downloadGeometryChunk } from "#src/datasource/zarr-vectors/geometry_chunk_download.js";
+import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/base.js";
+import type { DecodedChunk } from "#src/datasource/zarr-vectors/chunk_decode.js";
+import {
+  decodeChunk,
+  edgeTangents,
+  forEachFragmentVertex,
+} from "#src/datasource/zarr-vectors/chunk_decode.js";
 import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js";
 import { LevelCells } from "#src/datasource/zarr-vectors/level_cells.js";
 import { CrossChunkLinks } from "#src/datasource/zarr-vectors/links.js";
@@ -37,27 +36,20 @@ import {
   decodeObjectManifest,
   resolveFragmentRef,
 } from "#src/datasource/zarr-vectors/object_manifest.js";
-import type { ZarrVectorsObjectTable } from "#src/datasource/zarr-vectors/objects.js";
 import {
   readObjectTable,
   SegmentIdIndex,
 } from "#src/datasource/zarr-vectors/objects.js";
-import type { ZarrVectorsLevel } from "#src/datasource/zarr-vectors/store.js";
-import type { VertexAttributeDtype } from "#src/datasource/zarr-vectors/vertex_attribute_float.js";
 import type {
-  ShardIndexCache,
-  ZarrArrayRead,
-} from "#src/datasource/zarr-vectors/zarr_array.js";
+  ZarrVectorsLevel,
+  ZarrVectorsStoreAccess,
+} from "#src/datasource/zarr-vectors/store.js";
+import {
+  AsyncLru,
+  SHARED_SIGNAL,
+  warnOnce,
+} from "#src/datasource/zarr-vectors/util.js";
 import { decodeVlenElements } from "#src/datasource/zarr-vectors/zarr_array.js";
-
-export interface ObjectReaderOptions {
-  read: ZarrArrayRead;
-  shardIndexes: ShardIndexCache;
-  listDirectories?: (path: string) => Promise<string[]>;
-  description: ZarrVectorsGeometryDescription;
-  level: ZarrVectorsLevel;
-  warn: (message: string) => void;
-}
 
 export interface ObjectSkeleton {
   positions: Float32Array;
@@ -66,69 +58,46 @@ export interface ObjectSkeleton {
   attributes: Float32Array[];
 }
 
-/** A signal that never aborts, for loads shared between requests. */
-const SHARED_SIGNAL = new AbortController().signal;
-
-interface ObjectIndex {
-  table: ZarrVectorsObjectTable;
-  rows: SegmentIdIndex;
-  chunkRows: number;
+/** One object's vertices in each chunk it visits, in manifest (walk) order. */
+interface ObjectParts {
+  order: { chunkKey: string; vertices: number[] }[];
+  chunks: Map<string, DecodedChunk>;
 }
 
 export class ObjectReader {
-  readonly cells: LevelCells;
+  private cells: LevelCells;
   private links: CrossChunkLinks | undefined;
-  private index: Promise<ObjectIndex | undefined> | undefined;
+  private index:
+    | Promise<{ rows: SegmentIdIndex; chunkRows: number } | undefined>
+    | undefined;
   // Decoded chunks are large (tens of MB at a whole-brain store's finest
   // level) and not charged to the chunk manager, so keep only a few.
-  private chunks = new ChunkCoalescingCache<DecodedChunk | undefined>(8);
-  private manifestChunks = new ChunkCoalescingCache<Uint8Array[]>(16);
+  private chunks = new AsyncLru<DecodedChunk | undefined>(8);
+  private manifestChunks = new AsyncLru<Uint8Array[]>(16);
 
-  constructor(private options: ObjectReaderOptions) {
-    const { level, description } = options;
-    const known = new Map<string, any>();
-    known.set("vertices", level.arrays.vertices);
-    known.set("vertex_fragments", level.arrays.vertexFragments);
-    known.set(
-      "fragment_attributes/segment_id",
-      level.arrays.fragmentSegmentIds,
-    );
-    description.attributes.forEach((a, i) =>
-      known.set(`vertex_attributes/${a.name}`, level.arrays.attributes[i]),
-    );
-    this.cells = new LevelCells(
-      options.read,
-      options.shardIndexes,
-      level.path,
-      known,
-    );
-    if (KIND_CAPABILITIES[description.geometryKind].edgeSource !== "none") {
+  constructor(
+    private access: ZarrVectorsStoreAccess,
+    private description: ZarrVectorsGeometryDescription,
+    level: ZarrVectorsLevel,
+  ) {
+    this.cells = LevelCells.forLevel(access, level, description);
+    if (KIND_CAPABILITIES[description.geometryKind].primitive !== "points") {
       this.links = new CrossChunkLinks({
         cells: this.cells,
-        listDirectories:
-          options.listDirectories === undefined
-            ? undefined
-            : (path) => options.listDirectories!(`${level.path}/${path}`),
-        warn: options.warn,
+        listDirectories: (path) =>
+          access.listDirectories(`${level.path}/${path}`),
+        warn: warnOnce,
       });
     }
   }
 
-  private objectIndex(): Promise<ObjectIndex | undefined> {
+  private objectIndex() {
     if (this.index === undefined) {
       const promise = (async () => {
-        const table = await readObjectTable(
-          {
-            read: this.options.read,
-            shardIndexes: this.options.shardIndexes,
-            listDirectories: async () => [],
-          },
-          this.options.level.path,
-        );
+        const table = await readObjectTable(this.access, this.cells.levelPath);
         if (table === undefined) return undefined;
         const manifests = await this.cells.reader("object_index/manifests");
         return {
-          table,
           rows: new SegmentIdIndex(table.segmentIds),
           chunkRows: manifests?.array.readChunkShape[0] ?? 1,
         };
@@ -141,12 +110,10 @@ export class ObjectReader {
     return this.index;
   }
 
-  /** The manifest blocks of the object shown as `segmentId`. */
+  /** The manifest of the object shown as `segmentId`. */
   async manifest(segmentId: bigint): Promise<ManifestBlock[]> {
     const index = await this.objectIndex();
-    if (index === undefined) {
-      throw new Error("this store has no object index");
-    }
+    if (index === undefined) throw new Error("this store has no object index");
     const row = index.rows.rowOf(segmentId);
     if (row === undefined) return [];
     const reader = await this.cells.reader("object_index/manifests");
@@ -158,68 +125,41 @@ export class ObjectReader {
       return bytes === undefined ? [] : decodeVlenElements(bytes);
     });
     const blob = elements[row - chunk * index.chunkRows];
-    if (blob === undefined || blob.byteLength === 0) return [];
-    return decodeObjectManifest(blob, this.options.description.rank);
+    return blob === undefined || blob.byteLength === 0
+      ? []
+      : decodeObjectManifest(blob, 3);
   }
 
-  private decodedChunk(chunkKey: string): Promise<DecodedChunk | undefined> {
-    const { description, level } = this.options;
-    return this.chunks.get(chunkKey, () =>
-      downloadGeometryChunk(
-        {
-          chunkKey,
-          rank: description.rank,
-          linkDtype: String(
-            level.arrays.intraLinks?.attributes?.dtype ?? "int64",
-          ) as any,
-          attributeNames: description.attributes.map((a) => a.name),
-          attributeDtypes: description.attributes.map(
-            (a) => a.dtype as VertexAttributeDtype,
-          ),
-          attributeComponents: description.attributes.map((a) => a.components),
-          vertexDtype: String(
-            level.arrays.vertices.attributes?.dtype ?? "float32",
-          ) as VertexAttributeDtype,
-          linksConvention: description.linksConvention,
-          geometryKind: description.geometryKind,
-          // Objects are already known by manifest; per-fragment ids are not needed.
-          hasFragmentSegmentIds: false,
-          vertexIdAttribute: undefined,
-          linkWidth: description.linkWidth,
-          linkedSkeletonLayout: description.linkedSkeletonLayout,
-          cellRead: this.cells.cellReader,
-        },
-        SHARED_SIGNAL,
+  private async parts(
+    segmentId: bigint,
+    signal: AbortSignal,
+  ): Promise<ObjectParts> {
+    const blocks = await this.manifest(segmentId);
+    const keys = [...new Set(blocks.map((b) => b.chunkCoords.join(".")))];
+    const decoded = await Promise.all(
+      keys.map((key) =>
+        this.chunks.get(key, () =>
+          decodeChunk(this.cells, this.description, key, SHARED_SIGNAL, {
+            skipSegmentIds: true,
+          }),
+        ),
       ),
     );
-  }
-
-  /**
-   * Vertices of the object in each chunk it visits, in manifest (walk) order.
-   * Keys are chunk keys; values the chunk-local vertex indices.
-   */
-  private async objectVertices(
-    blocks: ManifestBlock[],
-    signal: AbortSignal,
-  ): Promise<{
-    order: { chunkKey: string; vertices: Uint32Array }[];
-    chunks: Map<string, DecodedChunk>;
-  }> {
-    const keys = [...new Set(blocks.map((b) => b.chunkCoords.join(".")))];
-    const decoded = await Promise.all(keys.map((k) => this.decodedChunk(k)));
     signal.throwIfAborted();
     const chunks = new Map<string, DecodedChunk>();
-    keys.forEach((k, i) => {
-      if (decoded[i] !== undefined) chunks.set(k, decoded[i]!);
+    keys.forEach((key, i) => {
+      if (decoded[i] !== undefined) chunks.set(key, decoded[i]!);
     });
-    const order: { chunkKey: string; vertices: Uint32Array }[] = [];
+    const order: ObjectParts["order"] = [];
     for (const block of blocks) {
       const chunkKey = block.chunkCoords.join(".");
       const chunk = chunks.get(chunkKey);
       if (chunk === undefined) continue;
       for (const f of resolveFragmentRef(block.fragmentRef)) {
-        if (f >= chunk.fragmentIndex.numFragments) continue;
-        order.push({ chunkKey, vertices: chunk.fragmentIndex.indices(f) });
+        if (f >= chunk.fragments.numFragments) continue;
+        const vertices: number[] = [];
+        forEachFragmentVertex(chunk.fragments, f, (v) => vertices.push(v));
+        order.push({ chunkKey, vertices });
       }
     }
     return { order, chunks };
@@ -229,109 +169,113 @@ export class ObjectReader {
     segmentId: bigint,
     signal: AbortSignal,
   ): Promise<ObjectSkeleton> {
-    const { description } = this.options;
-    const blocks = await this.manifest(segmentId);
-    const { order, chunks } = await this.objectVertices(blocks, signal);
-    // Global vertex numbering: one entry per (chunk, local vertex).
-    const globalOf = new Map<string, Map<number, number>>();
+    const { description } = this;
+    const { order, chunks } = await this.parts(segmentId, signal);
+    // One output vertex per (chunk, local vertex).
+    const indexOf = new Map<string, Map<number, number>>();
     const sources: { chunk: DecodedChunk; vertex: number }[] = [];
     const add = (chunkKey: string, vertex: number) => {
-      let map = globalOf.get(chunkKey);
-      if (map === undefined) globalOf.set(chunkKey, (map = new Map()));
-      let g = map.get(vertex);
-      if (g === undefined) {
-        g = sources.length;
-        map.set(vertex, g);
+      let map = indexOf.get(chunkKey);
+      if (map === undefined) indexOf.set(chunkKey, (map = new Map()));
+      let i = map.get(vertex);
+      if (i === undefined) {
+        i = sources.length;
+        map.set(vertex, i);
         sources.push({ chunk: chunks.get(chunkKey)!, vertex });
       }
-      return g;
+      return i;
     };
     const edges: number[] = [];
-    const sequential =
-      description.linksConvention === "implicit_sequential" &&
-      KIND_CAPABILITIES[description.geometryKind].edgeSource !== "none";
-    let previousTail: number | undefined;
-    for (const { chunkKey, vertices } of order) {
-      let prev: number | undefined;
-      for (const v of vertices) {
-        const g = add(chunkKey, v);
-        if (sequential && prev !== undefined) edges.push(prev, g);
-        prev = g;
-      }
-      if (sequential && previousTail !== undefined && vertices.length > 0) {
-        // Consecutive manifest blocks continue the same curve.
-        edges.push(previousTail, globalOf.get(chunkKey)!.get(vertices[0])!);
-      }
-      if (vertices.length > 0) previousTail = prev;
-    }
-    if (!sequential) {
-      // Explicit / branched connectivity: the chunk's own edges between this
-      // object's vertices, plus cross-chunk links between them.
-      for (const [chunkKey, map] of globalOf) {
-        const chunk = chunks.get(chunkKey)!;
-        const e = chunk.edges;
-        for (let i = 0; i < e.length; i += 2) {
-          const a = map.get(e[i]);
-          const b = map.get(e[i + 1]);
-          if (a !== undefined && b !== undefined) edges.push(a, b);
+    const primitive = KIND_CAPABILITIES[description.geometryKind].primitive;
+    if (
+      primitive === "lines" &&
+      description.linksConvention === "implicit_sequential"
+    ) {
+      // A curve: its fragments, in manifest order, continue one another.
+      let tail: number | undefined;
+      for (const { chunkKey, vertices } of order) {
+        for (const v of vertices) {
+          const i = add(chunkKey, v);
+          if (tail !== undefined) edges.push(tail, i);
+          tail = i;
         }
       }
-      if (this.links !== undefined) {
-        const tables = await Promise.all(
-          [...globalOf.keys()].map((k) =>
-            this.links!.linksOwnedBy(k.split(".").map(Number), signal),
-          ),
-        );
-        for (const table of tables) {
-          for (const record of table?.records ?? []) {
-            if (record.endpoints.length !== 2) continue;
-            const [a, b] = record.endpoints.map((e) =>
-              globalOf.get(e.chunkCoords.join("."))?.get(e.vertexIndex),
-            );
-            if (a !== undefined && b !== undefined) edges.push(a, b);
-          }
+    } else {
+      for (const { chunkKey, vertices } of order) {
+        for (const v of vertices) add(chunkKey, v);
+      }
+      // The links between its chunks...
+      const linked = description.skeletonLayout === "linked";
+      const relinked = new Set<string>();
+      for (const chunkKey of indexOf.keys()) {
+        const coords = chunkKey.split(".").map(Number);
+        const links = linked
+          ? this.links?.linksTouching(coords)
+          : this.links?.linksOwnedBy(coords);
+        for (const { endpoints } of (await links) ?? []) {
+          if (endpoints.length !== 2) continue;
+          const keys = endpoints.map((e) => e.chunkCoords.join("."));
+          const [a, b] = endpoints.map((e, i) =>
+            indexOf.get(keys[i])?.get(e.vertexIndex),
+          );
+          if (a === undefined || b === undefined) continue;
+          if (keys[0] !== chunkKey && keys[1] !== chunkKey) continue;
+          if (linked && keys[0] !== chunkKey) continue; // the child's chunk keeps it
+          edges.push(a, b);
+          // In a linked skeleton the link replaces the child's implied parent.
+          if (linked) relinked.add(`${keys[0]}:${endpoints[0].vertexIndex}`);
+        }
+      }
+      // ...and each chunk's own edges between its vertices.
+      for (const [chunkKey, map] of indexOf) {
+        const e = chunks.get(chunkKey)!.edges;
+        for (let k = 0; k < e.length; k += 2) {
+          const a = map.get(e[k]);
+          const b = map.get(e[k + 1]);
+          if (a === undefined || b === undefined) continue;
+          const implied = e[k] + 1 === e[k + 1];
+          if (implied && relinked.has(`${chunkKey}:${e[k + 1]}`)) continue;
+          edges.push(a, b);
         }
       }
     }
     const n = sources.length;
     const positions = new Float32Array(n * 3);
-    const rank = description.rank;
-    const widths = description.attributes.map((a) => a.components);
-    const attributes = widths.map((w) => new Float32Array(n * w));
-    sources.forEach(({ chunk, vertex }, g) => {
-      for (let d = 0; d < 3; ++d) {
-        positions[g * 3 + d] =
-          d < rank ? chunk.positions[vertex * rank + d] : 0;
-      }
-      widths.forEach((w, i) => {
-        const src = chunk.vertexAttributes[i] as Float32Array<ArrayBuffer>;
-        attributes[i].set(src.subarray(vertex * w, (vertex + 1) * w), g * w);
+    const attributes = description.attributes.map(
+      (a) => new Float32Array(n * a.components),
+    );
+    sources.forEach(({ chunk, vertex }, i) => {
+      positions.set(
+        chunk.positions.subarray(3 * vertex, 3 * vertex + 3),
+        3 * i,
+      );
+      description.attributes.forEach(({ components: w }, k) => {
+        attributes[k].set(
+          chunk.attributes[k].subarray(w * vertex, w * (vertex + 1)),
+          w * i,
+        );
       });
     });
-    if (hasTangentAttribute(description)) {
-      attributes.push(tangentsFromEdges(positions, edges, n));
+    const edgeArray = Uint32Array.from(edges);
+    if (KIND_CAPABILITIES[description.geometryKind].tangent !== undefined) {
+      attributes.push(edgeTangents(positions, edgeArray));
     }
-    return { positions, edges: Uint32Array.from(edges), attributes };
+    return { positions, edges: edgeArray, attributes };
   }
 
   /** Mesh fragment ids of an object: the chunks it occupies. */
-  async meshFragmentKeys(
-    segmentId: bigint,
-    signal: AbortSignal,
-  ): Promise<string[]> {
-    signal.throwIfAborted();
+  async meshFragmentKeys(segmentId: bigint): Promise<string[]> {
     const blocks = await this.manifest(segmentId);
     return [...new Set(blocks.map((b) => b.chunkCoords.join(".")))];
   }
 
-  /** Triangles of one object within one chunk, including faces it shares with neighbours. */
+  /** An object's triangles in one chunk, including faces shared with neighbours. */
   async readMeshFragment(
     segmentId: bigint,
     chunkKey: string,
     signal: AbortSignal,
   ): Promise<{ positions: Float32Array; indices: Uint32Array }> {
-    const blocks = await this.manifest(segmentId);
-    const { order, chunks } = await this.objectVertices(blocks, signal);
+    const { order, chunks } = await this.parts(segmentId, signal);
     const member = new Map<string, Set<number>>();
     for (const { chunkKey: key, vertices } of order) {
       let set = member.get(key);
@@ -343,94 +287,44 @@ export class ObjectReader {
     if (chunk === undefined || local === undefined) {
       return { positions: new Float32Array(0), indices: new Uint32Array(0) };
     }
-    const rank = this.options.description.rank;
     const positions: number[] = [];
     const remap = new Map<string, number>();
     const vertexOf = (key: string, v: number) => {
       const id = `${key}:${v}`;
       let out = remap.get(id);
       if (out === undefined) {
-        const source = key === chunkKey ? chunk : chunks.get(key)!;
         out = positions.length / 3;
-        for (let d = 0; d < 3; ++d) {
-          positions.push(d < rank ? source.positions[v * rank + d] : 0);
-        }
+        positions.push(
+          ...chunks.get(key)!.positions.subarray(3 * v, 3 * v + 3),
+        );
         remap.set(id, out);
       }
       return out;
     };
     const indices: number[] = [];
-    const faces = chunk.faces ?? new Uint32Array(0);
+    const { faces } = chunk;
     for (let i = 0; i < faces.length; i += 3) {
-      if (
-        local.has(faces[i]) &&
-        local.has(faces[i + 1]) &&
-        local.has(faces[i + 2])
-      ) {
-        indices.push(
-          vertexOf(chunkKey, faces[i]),
-          vertexOf(chunkKey, faces[i + 1]),
-          vertexOf(chunkKey, faces[i + 2]),
-        );
+      if ([0, 1, 2].every((k) => local.has(faces[i + k]))) {
+        indices.push(...[0, 1, 2].map((k) => vertexOf(chunkKey, faces[i + k])));
       }
     }
-    if (this.links !== undefined) {
-      const table = await this.links.linksOwnedBy(
-        chunkKey.split(".").map(Number),
-        signal,
+    for (const { endpoints } of (await this.links?.linksOwnedBy(
+      chunkKey.split(".").map(Number),
+    )) ?? []) {
+      if (endpoints.length < 3) continue;
+      const keys = endpoints.map((e) => e.chunkCoords.join("."));
+      const ours = endpoints.every(
+        (e, i) =>
+          member.get(keys[i])?.has(e.vertexIndex) && chunks.has(keys[i]),
       );
-      for (const record of table?.records ?? []) {
-        const corners = record.endpoints;
-        if (corners.length < 3) continue;
-        const keys = corners.map((e) => e.chunkCoords.join("."));
-        if (
-          !corners.every(
-            (e, i) =>
-              member.get(keys[i])?.has(e.vertexIndex) === true &&
-              chunks.has(keys[i]),
-          )
-        ) {
-          continue;
-        }
-        const ids = corners.map((e, i) => vertexOf(keys[i], e.vertexIndex));
-        for (let k = 1; k + 1 < ids.length; ++k) {
-          indices.push(ids[0], ids[k], ids[k + 1]);
-        }
-      }
+      if (!ours) continue;
+      const ids = endpoints.map((e, i) => vertexOf(keys[i], e.vertexIndex));
+      for (let k = 1; k + 1 < ids.length; ++k)
+        indices.push(ids[0], ids[k], ids[k + 1]);
     }
     return {
       positions: Float32Array.from(positions),
       indices: Uint32Array.from(indices),
     };
   }
-}
-
-/** Unit tangent per vertex: the mean direction of its edges, walk-oriented. */
-function tangentsFromEdges(
-  positions: Float32Array,
-  edges: number[],
-  n: number,
-): Float32Array<ArrayBuffer> {
-  const out = new Float32Array(n * 3);
-  for (let i = 0; i < edges.length; i += 2) {
-    const a = edges[i];
-    const b = edges[i + 1];
-    for (let d = 0; d < 3; ++d) {
-      const delta = positions[b * 3 + d] - positions[a * 3 + d];
-      out[a * 3 + d] += delta;
-      out[b * 3 + d] += delta;
-    }
-  }
-  for (let v = 0; v < n; ++v) {
-    const x = out[v * 3];
-    const y = out[v * 3 + 1];
-    const z = out[v * 3 + 2];
-    const norm = Math.hypot(x, y, z);
-    if (norm > 0) {
-      out[v * 3] = x / norm;
-      out[v * 3 + 1] = y / norm;
-      out[v * 3 + 2] = z / norm;
-    }
-  }
-  return out;
 }

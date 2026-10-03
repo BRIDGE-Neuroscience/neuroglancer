@@ -29,16 +29,18 @@
  * the same values per fragment, so geometry and properties agree.
  */
 
+import type { ElementType } from "#src/datasource/zarr-vectors/dtype.js";
+import {
+  decodeFloat32,
+  decodeUint64,
+} from "#src/datasource/zarr-vectors/dtype.js";
+import type { ZarrVectorsStoreAccess } from "#src/datasource/zarr-vectors/store.js";
 import {
   checkObjectIndexLayout,
   readJson,
 } from "#src/datasource/zarr-vectors/store.js";
-import type {
-  ZarrArrayRead,
-  ShardIndexCache,
-} from "#src/datasource/zarr-vectors/zarr_array.js";
+import { mapConcurrent } from "#src/datasource/zarr-vectors/util.js";
 import {
-  mapConcurrent,
   parseZarrArrayMetadata,
   ZarrArrayReader,
 } from "#src/datasource/zarr-vectors/zarr_array.js";
@@ -64,14 +66,8 @@ export interface ZarrVectorsObjectTable {
   objectIndexAttrs: any;
 }
 
-export interface ZarrVectorsObjectAccess {
-  read: ZarrArrayRead;
-  shardIndexes: ShardIndexCache;
-  listDirectories(path: string, signal?: AbortSignal): Promise<string[]>;
-}
-
 async function openReader(
-  access: ZarrVectorsObjectAccess,
+  access: ZarrVectorsStoreAccess,
   path: string,
   signal?: AbortSignal,
 ): Promise<ZarrArrayReader | undefined> {
@@ -84,98 +80,9 @@ async function openReader(
   );
 }
 
-/**
- * Decodes little-endian integer elements to 64-bit ids.  Signed values are
- * reinterpreted as unsigned (a `-1` fill becomes 2^64-1, never a valid id).
- */
-export function decodeIdColumn(
-  bytes: Uint8Array,
-  elementType: string,
-  count: number,
-): BigUint64Array {
-  const out = new BigUint64Array(count);
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  switch (elementType) {
-    case "int64":
-    case "uint64":
-      for (let i = 0; i < count; ++i) out[i] = view.getBigUint64(i * 8, true);
-      break;
-    case "int32":
-      for (let i = 0; i < count; ++i) {
-        out[i] = BigInt.asUintN(64, BigInt(view.getInt32(i * 4, true)));
-      }
-      break;
-    case "uint32":
-      for (let i = 0; i < count; ++i)
-        out[i] = BigInt(view.getUint32(i * 4, true));
-      break;
-    case "int16":
-    case "uint16":
-      for (let i = 0; i < count; ++i)
-        out[i] = BigInt(view.getUint16(i * 2, true));
-      break;
-    case "int8":
-    case "uint8":
-      for (let i = 0; i < count; ++i) out[i] = BigInt(view.getUint8(i));
-      break;
-    default:
-      throw new Error(`id column dtype ${elementType} is not an integer type`);
-  }
-  return out;
-}
-
-/** Decodes any numeric element type to float32. */
-export function decodeNumericColumn(
-  bytes: Uint8Array,
-  elementType: string,
-  count: number,
-): Float32Array {
-  const out = new Float32Array(count);
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const get: (i: number) => number = (() => {
-    switch (elementType) {
-      case "float32":
-        return (i: number) => view.getFloat32(i * 4, true);
-      case "float64":
-        return (i: number) => view.getFloat64(i * 8, true);
-      case "float16":
-        return (i: number) => float16ToNumber(view.getUint16(i * 2, true));
-      case "int64":
-        return (i: number) => Number(view.getBigInt64(i * 8, true));
-      case "uint64":
-        return (i: number) => Number(view.getBigUint64(i * 8, true));
-      case "int32":
-        return (i: number) => view.getInt32(i * 4, true);
-      case "uint32":
-        return (i: number) => view.getUint32(i * 4, true);
-      case "int16":
-        return (i: number) => view.getInt16(i * 2, true);
-      case "uint16":
-        return (i: number) => view.getUint16(i * 2, true);
-      case "int8":
-        return (i: number) => view.getInt8(i);
-      case "uint8":
-      case "bool":
-        return (i: number) => view.getUint8(i);
-    }
-    throw new Error(`unsupported numeric dtype ${elementType}`);
-  })();
-  for (let i = 0; i < count; ++i) out[i] = get(i);
-  return out;
-}
-
-export function float16ToNumber(h: number): number {
-  const sign = h & 0x8000 ? -1 : 1;
-  const exponent = (h >> 10) & 0x1f;
-  const fraction = h & 0x3ff;
-  if (exponent === 0) return sign * 2 ** -14 * (fraction / 1024);
-  if (exponent === 31) return fraction ? Number.NaN : sign * Infinity;
-  return sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
-}
-
 /** Reads the object table of a level, or `undefined` if it has no objects. */
 export async function readObjectTable(
-  access: ZarrVectorsObjectAccess,
+  access: ZarrVectorsStoreAccess,
   levelPath: string,
   signal?: AbortSignal,
 ): Promise<ZarrVectorsObjectTable | undefined> {
@@ -202,29 +109,19 @@ export async function readObjectTable(
   }
   if (!(numObjects > 0)) return undefined;
 
+  const readIds = (reader: ZarrArrayReader | undefined) =>
+    reader
+      ?.readRows(0, numObjects, signal)
+      .then((bytes) =>
+        decodeUint64(
+          bytes,
+          reader.array.elementType as ElementType,
+          numObjects,
+        ),
+      );
   const [objectIds, segmentColumn] = await Promise.all([
-    objectIdsReader === undefined
-      ? Promise.resolve(undefined)
-      : objectIdsReader
-          .readRows(0, numObjects, signal)
-          .then((bytes) =>
-            decodeIdColumn(
-              bytes,
-              objectIdsReader.array.elementType,
-              numObjects,
-            ),
-          ),
-    segmentIdReader === undefined
-      ? Promise.resolve(undefined)
-      : segmentIdReader
-          .readRows(0, numObjects, signal)
-          .then((bytes) =>
-            decodeIdColumn(
-              bytes,
-              segmentIdReader.array.elementType,
-              numObjects,
-            ),
-          ),
+    readIds(objectIdsReader),
+    readIds(segmentIdReader),
   ]);
   let segmentIds: BigUint64Array;
   let idSource: ZarrVectorsObjectTable["idSource"];
@@ -329,7 +226,7 @@ function groupNames(attrs: any, count: number): string[] {
 
 /** Reads a level's `groups/` array into a per-row group id. */
 export async function readGroups(
-  access: ZarrVectorsObjectAccess,
+  access: ZarrVectorsStoreAccess,
   levelPath: string,
   table: ZarrVectorsObjectTable,
   signal?: AbortSignal,
@@ -391,7 +288,7 @@ export async function readGroups(
  * filter `length>50`), groups become tags plus a label (`#bundle_name`).
  */
 export async function readSegmentProperties(
-  access: ZarrVectorsObjectAccess,
+  access: ZarrVectorsStoreAccess,
   levelPath: string,
   table: ZarrVectorsObjectTable,
   warnings: string[],
@@ -439,9 +336,9 @@ export async function readSegmentProperties(
     const channels = array.shape.slice(1).reduce((a, b) => a * b, 1);
     if (channels > 4) return;
     const bytes = await reader.readAllRows(signal);
-    const values = decodeNumericColumn(
+    const values = decodeFloat32(
       bytes,
-      array.elementType,
+      array.elementType as ElementType,
       numObjects * channels,
     );
     if (array.attributes?.has_present_mask === true) {

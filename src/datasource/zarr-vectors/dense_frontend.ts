@@ -35,14 +35,19 @@ import {
   ChunkRenderLayerFrontend,
   WithParameters,
 } from "#src/chunk_manager/frontend.js";
-import type { ZarrVectorsChunkSpecification } from "#src/datasource/zarr-vectors/base.js";
+import type {
+  ZarrVectorsChunkSpecification,
+  ZarrVectorsGeometryDescription,
+} from "#src/datasource/zarr-vectors/base.js";
 import {
   ZARR_VECTORS_DENSE_RENDER_LAYER_RPC_ID,
   ZARR_VECTORS_DENSE_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
   ZarrVectorsGeometryChunkSourceParameters,
 } from "#src/datasource/zarr-vectors/base.js";
-import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
-import { hasTangentAttribute } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
+import {
+  addStringShaderSupport,
+  setShaderControls,
+} from "#src/datasource/zarr-vectors/compat.js";
 import { selectDenseLevel } from "#src/datasource/zarr-vectors/dense_lod.js";
 import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js";
 import type { HashMapUint64 } from "#src/gpu_hash/hash_table.js";
@@ -110,18 +115,12 @@ import {
   initializeLineShader,
 } from "#src/webgl/lines.js";
 import type { ShaderBuilder, ShaderProgram } from "#src/webgl/shader.js";
-import * as shaderLib from "#src/webgl/shader_lib.js";
 import { glsl_uint64 } from "#src/webgl/shader_lib.js";
-import type {
-  ShaderControlsBuilderState,
-  ShaderControlsParseResult,
-  ShaderControlState,
-} from "#src/webgl/shader_ui_controls.js";
+import type { ShaderControlsBuilderState } from "#src/webgl/shader_ui_controls.js";
 import {
   addControlsToBuilder,
   getFallbackBuilderState,
   parseShaderUiControls,
-  setControlsInShader,
 } from "#src/webgl/shader_ui_controls.js";
 
 import {
@@ -131,28 +130,6 @@ import {
   TextureFormat,
 } from "#src/webgl/texture_access.js";
 import { defineVertexId, VertexIdHelper } from "#src/webgl/vertex_id.js";
-
-/**
- * `setControlsInShader` takes the whole parse result in current Neuroglancer
- * and only its `controls` in older trees; pass whichever the build expects.
- */
-function setShaderControls(
-  gl: GL,
-  shader: ShaderProgram,
-  state: ShaderControlState,
-  parseResult: ShaderControlsParseResult,
-) {
-  const set = setControlsInShader as (...args: unknown[]) => void;
-  const result = parseResult as ShaderControlsParseResult & {
-    preprocessing?: unknown;
-  };
-  set(
-    gl,
-    shader,
-    state,
-    result.preprocessing !== undefined ? result : result.controls,
-  );
-}
 
 // ------------------------------------------------------------ chunks
 
@@ -285,7 +262,7 @@ export function attributeLayout(
     id: a.id,
     components: a.components,
   }));
-  if (hasTangentAttribute(description)) {
+  if (KIND_CAPABILITIES[description.geometryKind].tangent !== undefined) {
     layout.push({ id: "tangent", components: 3 });
   }
   return layout;
@@ -308,7 +285,7 @@ export class ZarrVectorsMultiscaleGeometrySource extends RefCounted {
   }
 
   get rank() {
-    return this.description.rank;
+    return 3;
   }
 
   getSources(): SliceViewSingleResolutionSource<ZarrVectorsGeometryChunkSource>[][] {
@@ -586,12 +563,7 @@ void emitDefault() {
     }
     builder.addFragmentCode(glsl_COLORMAPS);
     addControlsToBuilder(state, builder);
-    // String controls (newer Neuroglancer) need the string helpers.
-    // Looked up at run time so the bundler does not flag older trees.
-    const glslString = (shaderLib as Record<string, unknown>)[
-      ["glsl", "string"].join("_")
-    ];
-    if (typeof glslString === "string") builder.addFragmentCode(glslString);
+    addStringShaderSupport(builder);
     builder.addFragmentCode(`
 void zvUserMain();
 `);

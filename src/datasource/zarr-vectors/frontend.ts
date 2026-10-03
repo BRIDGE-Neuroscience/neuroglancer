@@ -15,15 +15,13 @@
  */
 
 /**
- * @file The `zarr-vectors:` data source.
- *
- * One store URL yields up to four subsources for a segmentation layer:
- *  - `""`        the dense overview of every object, from spatial chunks;
- *  - `objects`   selected objects at full resolution, through Neuroglancer's
- *                own skeleton layer (curves, skeletons, graphs);
- *  - `meshes`    selected objects through Neuroglancer's mesh layer (meshes);
- *  - `properties` object attributes and groups as segment properties, so the
- *                Seg tab can filter (`length>40`, `#bundle`) and colour.
+ * @file The `zarr-vectors:` data source. One store yields, for a
+ * segmentation layer:
+ *  - `""`         the dense overview of every object (`dense_frontend.ts`);
+ *  - `objects`    selected objects at full resolution, as Neuroglancer
+ *                 skeletons (curves, skeletons, graphs, points with objects);
+ *  - `meshes`     selected objects as Neuroglancer meshes (mesh stores);
+ *  - `properties` object attributes and groups as segment properties.
  */
 
 import type { ChunkManager } from "#src/chunk_manager/frontend.js";
@@ -40,14 +38,11 @@ import type {
   GetKvStoreBasedDataSourceOptions,
   KvStoreBasedDataSourceProvider,
 } from "#src/datasource/index.js";
-import type { ZarrVectorsChunkSpecification } from "#src/datasource/zarr-vectors/base.js";
 import {
   ZarrVectorsGeometryChunkSourceParameters,
   ZarrVectorsMeshSourceParameters,
   ZarrVectorsObjectSkeletonSourceParameters,
 } from "#src/datasource/zarr-vectors/base.js";
-import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
-import { hasTangentAttribute } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
 import {
   attributeLayout,
   ZarrVectorsMultiscaleGeometrySource,
@@ -58,19 +53,17 @@ import {
   readObjectTable,
   readSegmentProperties,
 } from "#src/datasource/zarr-vectors/objects.js";
-import type { ZarrVectorsStore } from "#src/datasource/zarr-vectors/store.js";
-import { openZarrVectorsStore } from "#src/datasource/zarr-vectors/store.js";
 import {
-  computeChunkIndexBounds,
+  chunkIndexBounds,
   formatAttributesFragment,
+  kvStoreAccess,
+  openZarrVectorsStore,
   parseAttributesFragment,
-} from "#src/datasource/zarr-vectors/store_metadata.js";
-import type { ZarrArrayRead } from "#src/datasource/zarr-vectors/zarr_array.js";
-import { ShardIndexCache } from "#src/datasource/zarr-vectors/zarr_array.js";
+} from "#src/datasource/zarr-vectors/store.js";
+import { warnOnce } from "#src/datasource/zarr-vectors/util.js";
 import { WithSharedKvStoreContext } from "#src/kvstore/chunk_source_frontend.js";
 import type { SharedKvStoreContext } from "#src/kvstore/frontend.js";
 import {
-  joinBaseUrlAndPath,
   kvstoreEnsureDirectoryPipelineUrl,
   parseUrlSuffix,
   pipelineUrlJoin,
@@ -88,16 +81,12 @@ export class ZarrVectorsObjectSkeletonSource extends WithParameters(
 ) {
   private vertexAttributes_: Map<string, VertexAttributeInfo> | undefined;
   get vertexAttributes() {
-    if (this.vertexAttributes_ === undefined) {
-      const map = new Map<string, VertexAttributeInfo>();
-      for (const a of attributeLayout(this.parameters.description)) {
-        map.set(a.id, {
-          dataType: DataType.FLOAT32,
-          numComponents: a.components,
-        });
-      }
-      this.vertexAttributes_ = map;
-    }
+    this.vertexAttributes_ ??= new Map(
+      attributeLayout(this.parameters.description).map((a) => [
+        a.id,
+        { dataType: DataType.FLOAT32, numComponents: a.components },
+      ]),
+    );
     return this.vertexAttributes_;
   }
 }
@@ -107,102 +96,6 @@ export class ZarrVectorsMeshSource extends WithParameters(
   ZarrVectorsMeshSourceParameters,
 ) {}
 
-function frontendAccess(context: SharedKvStoreContext, storeUrl: string) {
-  const read: ZarrArrayRead = async (path, options) => {
-    const response = await context.kvStoreContext.read(
-      joinBaseUrlAndPath(storeUrl, path),
-      { signal: options.signal, byteRange: options.byteRange },
-    );
-    if (response === undefined) return undefined;
-    return new Uint8Array(await response.response.arrayBuffer());
-  };
-  const listDirectories = async (path: string, signal?: AbortSignal) => {
-    const response = await context.kvStoreContext.list(
-      joinBaseUrlAndPath(storeUrl, `${path}/`),
-      { responseKeys: "suffix", signal },
-    );
-    return response.directories
-      .map((d) => d.replace(/\/$/, ""))
-      .filter((d) => d !== "");
-  };
-  return { read, listDirectories, shardIndexes: new ShardIndexCache() };
-}
-
-function resolveUrl(options: GetKvStoreBasedDataSourceOptions) {
-  const { authorityAndPath, query, fragment } = parseUrlSuffix(
-    options.url.suffix,
-  );
-  if (query) {
-    throw new Error(
-      `Invalid URL ${JSON.stringify(options.url.url)}: query parameters are not supported`,
-    );
-  }
-  let selectedAttributes: string[] | undefined;
-  try {
-    selectedAttributes = parseAttributesFragment(fragment);
-  } catch (e) {
-    throw new Error(
-      `Invalid URL ${JSON.stringify(options.url.url)}: ${(e as Error).message}`,
-    );
-  }
-  return {
-    storeUrl: kvstoreEnsureDirectoryPipelineUrl(
-      pipelineUrlJoin(
-        kvstoreEnsureDirectoryPipelineUrl(options.kvStoreUrl),
-        authorityAndPath ?? "",
-      ),
-    ),
-    selectedAttributes,
-  };
-}
-
-function geometryDescription(
-  store: ZarrVectorsStore,
-): ZarrVectorsGeometryDescription {
-  return {
-    rank: store.rank,
-    geometryKind: store.geometryKind,
-    linksConvention: store.linksConvention,
-    linkWidth: store.linkWidth,
-    linkedSkeletonLayout: store.linkedSkeletonLayout,
-    attributes: store.attributes,
-    vertexIdAttribute: store.vertexIdAttribute,
-    hasObjects: store.hasObjects,
-  };
-}
-
-function chunkSpecification(
-  store: ZarrVectorsStore,
-  levelIndex: number,
-): ZarrVectorsChunkSpecification {
-  const { rank, lowerBounds, upperBounds } = store;
-  const chunkShape = store.levels[levelIndex].chunkShape;
-  const chunkDataSize = Float32Array.from(chunkShape);
-  // Float arithmetic: a sub-unit chunk (0.5 mm) must not truncate to zero.
-  const { lowerChunkBound, upperChunkBound } = computeChunkIndexBounds(
-    lowerBounds,
-    upperBounds,
-    chunkShape,
-  );
-  return {
-    rank,
-    chunkDataSize,
-    lowerChunkBound,
-    upperChunkBound,
-    lowerVoxelBound: Float32Array.from(lowerBounds),
-    upperVoxelBound: Float32Array.from(upperBounds),
-    levelIndex,
-  };
-}
-
-const warned = new Set<string>();
-function warnOnce(storeUrl: string, message: string) {
-  const key = `${storeUrl}|${message}`;
-  if (warned.has(key)) return;
-  warned.add(key);
-  console.warn(`zarr-vectors (${storeUrl}): ${message}`);
-}
-
 async function buildDataSource(
   chunkManager: ChunkManager,
   context: SharedKvStoreContext,
@@ -210,144 +103,127 @@ async function buildDataSource(
   selectedAttributes: string[] | undefined,
   signal: AbortSignal | undefined,
 ): Promise<DataSource> {
-  const access = frontendAccess(context, storeUrl);
-  const store = await openZarrVectorsStore(
-    access,
-    storeUrl,
-    selectedAttributes,
-    signal,
-  );
-  if (store.levels.length === 0) {
-    throw new Error("the store has no level this viewer can read");
-  }
-  const description = geometryDescription(store);
-  const caps = KIND_CAPABILITIES[store.geometryKind];
+  const access = kvStoreAccess(context.kvStoreContext, storeUrl);
+  const store = await openZarrVectorsStore(access, selectedAttributes, signal);
+  const { description, levels, lowerBounds, upperBounds } = store;
+  const warnings = [...store.warnings];
 
-  const rank = store.rank;
   const space = makeCoordinateSpace({
-    rank,
+    rank: 3,
     names: store.axisNames,
     units: store.axisUnits,
     scales: Float64Array.from(store.axisScales),
     boundingBoxes: [
       makeIdentityTransformedBoundingBox({
-        lowerBounds: Float64Array.from(store.lowerBounds),
-        upperBounds: Float64Array.from(store.upperBounds),
+        lowerBounds: Float64Array.from(lowerBounds),
+        upperBounds: Float64Array.from(upperBounds),
       }),
     ],
   });
   let modelTransform = makeIdentityTransform(space);
   if (store.coordinateOffset !== undefined) {
     // The writer stores `world - coordinate_offset`; put the offset back.
-    const transform = matrix.createIdentity(Float64Array, rank + 1);
-    for (let i = 0; i < rank; ++i) {
-      transform[(rank + 1) * rank + i] = store.coordinateOffset[i];
-    }
+    const transform = matrix.createIdentity(Float64Array, 4);
+    transform.set(store.coordinateOffset, 12);
     modelTransform = { ...modelTransform, transform };
   }
 
-  const subsources: DataSubsourceEntry[] = [];
-  const densities = levelDensities(
-    store.levels,
-    store.lowerBounds,
-    store.upperBounds,
-  );
   const dense = new ZarrVectorsMultiscaleGeometrySource(
     chunkManager,
     context,
     description,
-    store.levels.map((level) => {
-      const parameters = new ZarrVectorsGeometryChunkSourceParameters();
-      parameters.storeUrl = storeUrl;
-      parameters.description = description;
-      parameters.level = level;
-      return { spec: chunkSpecification(store, level.index), parameters };
-    }),
-    densities,
-  );
-  subsources.push({
-    id: "",
-    default: true,
-    // The dense source is not one of Neuroglancer's mesh kinds; the
-    // zarr-vectors segmentation layer recognises and draws it.
-    subsource: { mesh: dense as any },
-  });
-
-  const finest = store.levels[0];
-  if (store.hasObjects) {
-    const table = await readObjectTable(access, finest.path, signal).catch(
-      (e) => {
-        warnOnce(
+    levels.map((level) => ({
+      spec: {
+        rank: 3,
+        chunkDataSize: Float32Array.from(level.chunkShape),
+        ...chunkIndexBounds(lowerBounds, upperBounds, level.chunkShape),
+        lowerVoxelBound: Float32Array.from(lowerBounds),
+        upperVoxelBound: Float32Array.from(upperBounds),
+        levelIndex: level.index,
+      },
+      parameters: Object.assign(
+        new ZarrVectorsGeometryChunkSourceParameters(),
+        {
           storeUrl,
+          description,
+          level,
+        },
+      ),
+    })),
+    levelDensities(levels, lowerBounds, upperBounds),
+  );
+  const subsources: DataSubsourceEntry[] = [
+    // Not one of Neuroglancer's mesh kinds: the zarr-vectors segmentation
+    // layer (`layer.ts`) recognises and draws it.
+    { id: "", default: true, subsource: { mesh: dense as any } },
+  ];
+
+  const table = description.hasObjects
+    ? await readObjectTable(access, levels[0].path, signal).catch((e) => {
+        warnings.push(
           `object index unreadable: ${e instanceof Error ? e.message : e}`,
         );
         return undefined;
-      },
+      })
+    : undefined;
+  if (table !== undefined) {
+    const params = { storeUrl, description, level: levels[0] };
+    subsources.push(
+      KIND_CAPABILITIES[description.geometryKind].primitive === "triangles"
+        ? {
+            id: "meshes",
+            default: true,
+            subsource: {
+              mesh: chunkManager.getChunkSource(ZarrVectorsMeshSource, {
+                sharedKvStoreContext: context,
+                parameters: Object.assign(
+                  new ZarrVectorsMeshSourceParameters(),
+                  params,
+                ),
+              }),
+            },
+          }
+        : {
+            id: "objects",
+            default: true,
+            subsource: {
+              mesh: chunkManager.getChunkSource(
+                ZarrVectorsObjectSkeletonSource,
+                {
+                  sharedKvStoreContext: context,
+                  parameters: Object.assign(
+                    new ZarrVectorsObjectSkeletonSourceParameters(),
+                    params,
+                  ),
+                },
+              ),
+            },
+          },
     );
-    if (table !== undefined) {
-      if (caps.primitive === "triangles") {
-        const parameters = new ZarrVectorsMeshSourceParameters();
-        parameters.storeUrl = storeUrl;
-        parameters.description = description;
-        parameters.level = finest;
-        subsources.push({
-          id: "meshes",
-          default: true,
-          subsource: {
-            mesh: chunkManager.getChunkSource(ZarrVectorsMeshSource, {
-              sharedKvStoreContext: context,
-              parameters,
-            }),
-          },
-        });
-      } else {
-        const parameters = new ZarrVectorsObjectSkeletonSourceParameters();
-        parameters.storeUrl = storeUrl;
-        parameters.description = description;
-        parameters.level = finest;
-        subsources.push({
-          id: "objects",
-          default: true,
-          subsource: {
-            mesh: chunkManager.getChunkSource(ZarrVectorsObjectSkeletonSource, {
-              sharedKvStoreContext: context,
-              parameters,
-            }),
-          },
-        });
-      }
-      const warnings: string[] = [];
-      const properties = await readSegmentProperties(
-        access,
-        finest.path,
-        table,
-        warnings,
-        signal,
-      );
-      for (const w of warnings) warnOnce(storeUrl, w);
-      if (properties !== undefined) {
-        subsources.push({
-          id: "properties",
-          default: true,
-          subsource: {
-            segmentPropertyMap: new SegmentPropertyMap({
-              inlineProperties: properties,
-            }),
-          },
-        });
-      }
+    const properties = await readSegmentProperties(
+      access,
+      levels[0].path,
+      table,
+      warnings,
+      signal,
+    );
+    if (properties !== undefined) {
+      subsources.push({
+        id: "properties",
+        default: true,
+        subsource: {
+          segmentPropertyMap: new SegmentPropertyMap({
+            inlineProperties: properties,
+          }),
+        },
+      });
     }
   }
-  for (const w of store.warnings) warnOnce(storeUrl, w);
-  if (!hasTangentAttribute(description) && caps.primitive === "lines") {
-    warnOnce(storeUrl, "no direction is available for this geometry");
-  }
+  for (const w of warnings) warnOnce(`${storeUrl}: ${w}`);
   return {
     modelTransform,
     subsources,
-    canonicalUrl:
-      `${storeUrl}|zarr-vectors:` +
-      formatAttributesFragment(selectedAttributes),
+    canonicalUrl: `${storeUrl}|zarr-vectors:${formatAttributesFragment(selectedAttributes)}`,
   };
 }
 
@@ -365,7 +241,28 @@ export class ZarrVectorsDataSource implements KvStoreBasedDataSourceProvider {
   async get(
     options: GetKvStoreBasedDataSourceOptions,
   ): Promise<DataSourceLookupResult> {
-    const { storeUrl, selectedAttributes } = resolveUrl(options);
+    const { authorityAndPath, query, fragment } = parseUrlSuffix(
+      options.url.suffix,
+    );
+    if (query) {
+      throw new Error(
+        `Invalid URL ${JSON.stringify(options.url.url)}: query parameters are not supported`,
+      );
+    }
+    let selectedAttributes: string[] | undefined;
+    try {
+      selectedAttributes = parseAttributesFragment(fragment);
+    } catch (e) {
+      throw new Error(
+        `Invalid URL ${JSON.stringify(options.url.url)}: ${(e as Error).message}`,
+      );
+    }
+    const storeUrl = kvstoreEnsureDirectoryPipelineUrl(
+      pipelineUrlJoin(
+        kvstoreEnsureDirectoryPipelineUrl(options.kvStoreUrl),
+        authorityAndPath ?? "",
+      ),
+    );
     return options.registry.chunkManager.memoize.getAsync(
       {
         type: "zarr-vectors:get",

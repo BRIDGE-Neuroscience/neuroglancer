@@ -14,46 +14,59 @@
  * limitations under the License.
  */
 
-/**
- * @file Parameters shared by the zarr-vectors frontend and chunk worker.
- */
+/** @file Plain data shared by the zarr-vectors frontend and chunk worker. */
 
-import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
-import type { ZarrVectorsLevel } from "#src/datasource/zarr-vectors/store.js";
+import type { ZarrVectorsGeometryKind } from "#src/datasource/zarr-vectors/geometry_kind.js";
+import type {
+  ZarrVectorsAttribute,
+  ZarrVectorsLevel,
+  ZarrVectorsLinksConvention,
+} from "#src/datasource/zarr-vectors/store.js";
 import type { SliceViewChunkSpecification } from "#src/sliceview/base.js";
 
-export type { ZarrVectorsGeometryKind } from "#src/datasource/zarr-vectors/geometry_kind.js";
+/** What every reader of a store's geometry needs to know about it. */
+export interface ZarrVectorsGeometryDescription {
+  geometryKind: ZarrVectorsGeometryKind;
+  linksConvention: ZarrVectorsLinksConvention;
+  /** 2 for edges; 3 or more for faces. */
+  linkWidth: number;
+  /**
+   * zarr-vectors-tools' skeleton layout. In `"linked"` stores a cross-chunk
+   * `[child, parent]` link replaces the child's implied parent; in `"split"`
+   * stores (precomputed ingests) it joins two copies of one vertex.
+   */
+  skeletonLayout: "linked" | "split" | undefined;
+  /** Exposed vertex attributes. */
+  attributes: ZarrVectorsAttribute[];
+  /** Whether the store has an object index. */
+  hasObjects: boolean;
+}
 
-/** One level's spatial chunks, for the dense render layer. */
-export class ZarrVectorsGeometryChunkSourceParameters {
+class ZarrVectorsSourceParameters {
   /** kvstore URL of the store root, ending in `/`. */
   storeUrl!: string;
   description!: ZarrVectorsGeometryDescription;
   level!: ZarrVectorsLevel;
+}
+
+/** One level's spatial chunks, for the dense overview. */
+export class ZarrVectorsGeometryChunkSourceParameters extends ZarrVectorsSourceParameters {
   static RPC_ID = "zarr-vectors/GeometryChunkSource";
 }
 
-/** Whole objects at full resolution, keyed by segment id. */
-export class ZarrVectorsObjectSkeletonSourceParameters {
-  storeUrl!: string;
-  description!: ZarrVectorsGeometryDescription;
-  /** The finest level, which per-object reads use. */
-  level!: ZarrVectorsLevel;
+/** Whole objects at the finest level, as Neuroglancer skeletons. */
+export class ZarrVectorsObjectSkeletonSourceParameters extends ZarrVectorsSourceParameters {
   static RPC_ID = "zarr-vectors/ObjectSkeletonSource";
 }
 
-/** Whole mesh objects, keyed by segment id. */
-export class ZarrVectorsMeshSourceParameters {
-  storeUrl!: string;
-  description!: ZarrVectorsGeometryDescription;
-  level!: ZarrVectorsLevel;
+/** Whole objects at the finest level, as Neuroglancer meshes. */
+export class ZarrVectorsMeshSourceParameters extends ZarrVectorsSourceParameters {
   static RPC_ID = "zarr-vectors/MeshSource";
 }
 
-/** A spatial chunk grid level, as the slice-view chunk machinery sees it. */
+/** A level's chunk grid, as Neuroglancer's slice-view machinery sees it. */
 export interface ZarrVectorsChunkSpecification
   extends SliceViewChunkSpecification<Float32Array> {
-  /** Index of the level in the store (0 = finest). */
   levelIndex: number;
 }
 
