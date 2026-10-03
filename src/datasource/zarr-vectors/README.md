@@ -91,6 +91,9 @@ Read through each array's own `zarr.json` (`zarr_array.ts`):
 - Codecs: none, zstd, blosc, gzip, zlib, crc32c; `sharding_indexed` with the
   declared index codecs and location. Codecs and sharding may differ per
   array, as `zvtools attach` and `build_pyramid` produce.
+- Byte-range reads of one key issued together (the cells of a shard that
+  several chunks need) are merged into one request when they lie within 8 KiB
+  of each other (`coalesceRangeReads`).
 - `chunk_grid_origin` (negative chunk coordinates), `nonempty_chunks`.
 - Positions in any float or integer dtype; vertex attributes of any numeric
   dtype with 1-4 components (the width is measured when `row_shape` is

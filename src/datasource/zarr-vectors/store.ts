@@ -34,6 +34,7 @@ import { intraLinksPath } from "#src/datasource/zarr-vectors/links.js";
 import { mapConcurrent } from "#src/datasource/zarr-vectors/util.js";
 import type { ZarrArrayRead } from "#src/datasource/zarr-vectors/zarr_array.js";
 import {
+  coalesceRangeReads,
   parseZarrArrayMetadata,
   ShardIndexCache,
   ZarrArrayReader,
@@ -124,14 +125,15 @@ export function kvStoreAccess(
   shardIndexes = new ShardIndexCache(),
 ): ZarrVectorsStoreAccess {
   return {
-    async read(path, options) {
+    // Cells of one shard needed together are fetched together.
+    read: coalesceRangeReads(async (path, options) => {
       const response = await context.read(joinBaseUrlAndPath(storeUrl, path), {
         signal: options.signal,
         byteRange: options.byteRange,
       });
       if (response === undefined) return undefined;
       return new Uint8Array(await response.response.arrayBuffer());
-    },
+    }),
     async listDirectories(path, signal) {
       const response = await context.list(
         joinBaseUrlAndPath(storeUrl, `${path}/`),
