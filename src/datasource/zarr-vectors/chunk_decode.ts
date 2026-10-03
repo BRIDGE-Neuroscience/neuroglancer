@@ -230,6 +230,10 @@ export interface DecodeChunkOptions {
   relinkedChildren?: ReadonlySet<number>;
   /** Skip `fragment_attributes/segment_id` (per-object reads know the object). */
   skipSegmentIds?: boolean;
+  /** Skip a mesh's faces (the dense overview draws its vertices only). */
+  skipFaces?: boolean;
+  /** The `vertices` cell, when the caller has it (or its read) already. */
+  vertices?: Promise<Uint8Array | undefined>;
 }
 
 /** Decodes the chunk at `chunkKey`, or `undefined` if it is empty. */
@@ -244,12 +248,14 @@ export async function decodeChunk(
   const { linksConvention, linkWidth, attributes } = description;
   const read = (path: string) => cells.readCell(path, chunkKey, signal);
   const linksPath =
-    primitive !== "points" && linksConvention !== "implicit_sequential"
+    primitive !== "points" &&
+    linksConvention !== "implicit_sequential" &&
+    !(primitive === "triangles" && options.skipFaces)
       ? intraLinksPath(linkWidth)
       : undefined;
   // Every array is requested in one wave; nothing's address depends on another.
   const reads = {
-    vertices: read("vertices"),
+    vertices: options.vertices ?? read("vertices"),
     fragments: read("vertex_fragments"),
     links: linksPath === undefined ? undefined : read(linksPath),
     attributes: Promise.all(
