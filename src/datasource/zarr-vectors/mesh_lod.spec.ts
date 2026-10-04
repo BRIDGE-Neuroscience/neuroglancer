@@ -16,6 +16,11 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  decodeFragments,
+  FRAGMENT_INDEX_MAGIC,
+  FRAGMENT_INDEX_VERSION,
+} from "#src/datasource/zarr-vectors/fragment_index.js";
+import {
   buildMeshOctree,
   meshGridOffset,
   meshLevels,
@@ -32,6 +37,30 @@ import { ShardIndexCache } from "#src/datasource/zarr-vectors/zarr_array.js";
 import { validateOctree } from "#src/mesh/multiscale.js";
 
 const signal = new AbortController().signal;
+
+/** A fragment index with one range `[0, rows)` (fragment_index_v1). */
+function singleRangeIndex(rows: number) {
+  const out = new Uint8Array(16 + 8 + 16 + 4);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, FRAGMENT_INDEX_MAGIC, true);
+  view.setUint16(4, FRAGMENT_INDEX_VERSION, true);
+  view.setUint32(8, 1, true); // fragments
+  view.setUint32(12, 1, true); // ranges
+  out[16] = 1; // fragment 0 is a range
+  view.setBigInt64(24, 0n, true);
+  view.setBigInt64(32, BigInt(rows), true);
+  return out;
+}
+
+/** A single-element vlen-bytes cell around `payload`. */
+function wrapVlenCell(payload: Uint8Array) {
+  const out = new Uint8Array(8 + payload.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, 1, true);
+  view.setUint32(4, payload.length, true);
+  out.set(payload, 8);
+  return out;
+}
 
 /** `validateOctree` without the empty flag (bit 31), which it does not mask. */
 function validate(octree: Uint32Array) {
@@ -211,6 +240,181 @@ describe("multi-resolution meshes from a zarr-vectors-tools pyramid", () => {
         expect(new Set(faces).size).toBe(faces.length);
         for (const count of edges.values()) expect(count).toBe(2);
       }
+    }
+  });
+
+  /** The fixture as seen through `edit`, which may rewrite any whole-file read. */
+  function edited(
+    edit: (path: string, bytes: Uint8Array) => Uint8Array | undefined,
+  ) {
+    const base = access();
+    const counter = { bytes: 0 };
+    return {
+      counter,
+      access: {
+        ...base,
+        read: async (path: string, options: any) => {
+          const bytes = await base.read(path, options);
+          // Cell data only: metadata is read once per level by either path.
+          if (path.includes("/c/")) counter.bytes += bytes?.byteLength ?? 0;
+          return bytes === undefined || options?.byteRange !== undefined
+            ? bytes
+            : edit(path, bytes);
+        },
+      },
+    };
+  }
+  const undeclared = (path: string, bytes: Uint8Array) => {
+    if (!path.endsWith("links/0/0.0.0_0.0.0/zarr.json")) return bytes;
+    const json = JSON.parse(new TextDecoder().decode(bytes));
+    delete json.attributes.link_groups;
+    return new TextEncoder().encode(JSON.stringify(json));
+  };
+
+  async function surfaces(view: ReturnType<typeof edited>) {
+    const store = await openZarrVectorsStore(view.access, undefined);
+    const out: string[][] = [];
+    for (const level of store.levels) {
+      const reader = new ObjectReader(view.access, store.description, level);
+      for (const object of [0, 1]) {
+        out.push((await facesAt(reader, object)).faces.sort());
+      }
+    }
+    return out;
+  }
+
+  it("declares one face group per object at every level", async () => {
+    for (const level of ["0", "1", "2"]) {
+      const json = JSON.parse(
+        new TextDecoder().decode(
+          (await fixtureRead("mesh_lod")(
+            `${level}/links/0/0.0.0_0.0.0/zarr.json`,
+            {},
+          ))!,
+        ),
+      );
+      expect(json.attributes.link_groups, `level ${level}`).toBe(
+        "per_vertex_fragment",
+      );
+    }
+  });
+
+  it("gives the same surfaces whether it reads rows or whole cells", async () => {
+    expect(await surfaces(edited((_, b) => b))).toEqual(
+      await surfaces(edited(undeclared)),
+    );
+  });
+
+  it("reads only its own rows of a chunk another object fills", async () => {
+    /** Bytes read to fetch `object`'s node in `chunk` of level `index`. */
+    async function cost(
+      view: ReturnType<typeof edited>,
+      index: number,
+      object: bigint,
+      chunk: number[],
+    ) {
+      const store = await openZarrVectorsStore(view.access, undefined);
+      const reader = new ObjectReader(
+        view.access,
+        store.description,
+        store.levels[index],
+      );
+      await reader.chunksOf(object);
+      view.counter.bytes = 0;
+      const node = await reader.readMeshNode(object, chunk, signal);
+      return { bytes: view.counter.bytes, faces: node.indices.length / 3 };
+    }
+    let compared = 0;
+    const store = await openZarrVectorsStore(access(), undefined);
+    for (const level of store.levels) {
+      const reader = new ObjectReader(access(), store.description, level);
+      const of1 = new Set((await reader.chunksOf(1n)).map((c) => c.join()));
+      for (const chunk of await reader.chunksOf(0n)) {
+        if (!of1.has(chunk.join())) continue;
+        // The object holding less of the chunk is where rows pay off.
+        const costs = await Promise.all(
+          [0n, 1n].map(async (object) => ({
+            rows: await cost(
+              edited((_, b) => b),
+              level.index,
+              object,
+              chunk,
+            ),
+            whole: await cost(edited(undeclared), level.index, object, chunk),
+          })),
+        );
+        const minor =
+          costs[0].rows.bytes < costs[1].rows.bytes ? costs[0] : costs[1];
+        for (const c of costs) expect(c.rows.faces).toBe(c.whole.faces);
+        expect(
+          minor.rows.bytes,
+          `level ${level.path} chunk ${chunk}`,
+        ).toBeLessThan(minor.whole.bytes);
+        ++compared;
+      }
+    }
+    expect(compared).toBeGreaterThan(0);
+  });
+
+  it("falls back to whole cells when the declaration does not hold", async () => {
+    const want = await surfaces(edited(undeclared));
+    const sidecar = /\/link_fragments\/c\//;
+    // Garbage where the face groups should be.
+    const garbage = edited((path, bytes) =>
+      sidecar.test(path) ? bytes.slice().reverse() : bytes,
+    );
+    expect(await surfaces(garbage)).toEqual(want);
+    // Valid, but one group for the whole chunk: wrong wherever two objects
+    // share a chunk.
+    const oneGroup = edited((path, bytes) => {
+      if (!sidecar.test(path)) return bytes;
+      const real = decodeFragments(bytes.subarray(8));
+      let rows = 0;
+      for (let f = 0; f < real.numFragments; ++f) rows += real.range(f).count;
+      return wrapVlenCell(singleRangeIndex(rows));
+    });
+    expect(await surfaces(oneGroup)).toEqual(want);
+    // No face groups at all.
+    const missing = edited((path, bytes) =>
+      sidecar.test(path) ? undefined : bytes,
+    );
+    expect(await surfaces(missing)).toEqual(want);
+  });
+
+  it("measures a level's edge length from a sample of its faces", async () => {
+    const store = await openZarrVectorsStore(access(), undefined);
+    for (const level of store.levels) {
+      const sampled = await new ObjectReader(
+        access(),
+        store.description,
+        level,
+      ).meanEdgeLength();
+      // Compare with object 0's own faces in one of its chunks: the same
+      // surfaces at the same resolution.
+      const reader = new ObjectReader(access(), store.description, level);
+      const chunk = (await reader.chunksOf(0n))[0];
+      expect(sampled, `level ${level.path}`).toBeGreaterThan(0);
+      const { positions: p, indices: f } = await reader.readMeshNode(
+        0n,
+        chunk,
+        signal,
+      );
+      let total = 0;
+      for (let t = 0; t < f.length; t += 3) {
+        for (let k = 0; k < 3; ++k) {
+          const a = f[t + k];
+          const b = f[t + ((k + 1) % 3)];
+          total += Math.hypot(
+            p[3 * a] - p[3 * b],
+            p[3 * a + 1] - p[3 * b + 1],
+            p[3 * a + 2] - p[3 * b + 2],
+          );
+        }
+      }
+      const object0 = total / f.length;
+      // Same surface, same resolution: within a factor of two.
+      expect(sampled! / object0).toBeGreaterThan(0.5);
+      expect(sampled! / object0).toBeLessThan(2);
     }
   });
 

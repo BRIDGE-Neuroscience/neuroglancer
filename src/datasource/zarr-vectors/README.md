@@ -85,6 +85,33 @@ One pyramid level is drawn per view: the finest whose vertices, for what the
 view would load, fit one vertex per `renderScale`² pixels (`dense_lod.ts`).
 The coarsest level stands in while it loads.
 
+## What a store needs
+
+To open, a store needs only what zarr-vectors-py 0.9.x writes for any
+geometry: a 3-D root with `zarr_vectors` metadata, and level 0's `vertices`
+and `vertex_fragments`. Everything else is optional. The viewer detects each
+feature per store (and, where it can vary, per chunk), uses it when present,
+and otherwise does what the right-hand column says. Most features change only
+cost; an object index and directory listing also change what can be shown.
+
+| Feature                                                              | Gives                                                 | Without it                                                  |
+| -------------------------------------------------------------------- | ----------------------------------------------------- | ----------------------------------------------------------- |
+| `object_index` (`vlen_manifests_v1`/`v2`)                            | `objects` / `meshes` / `properties` subsources        | dense overview only                                         |
+| more pyramid levels                                                  | dense overview level choice (`dense_lod.ts`)          | level 0 everywhere                                          |
+| mesh levels whose chunks double and that store faces                 | multi-resolution meshes (`mesh_lod.ts`)               | meshes at level 0                                           |
+| `"link_groups": "per_vertex_fragment"` on a level's intra face array | one object's faces read alone, by byte range          | whole face cells (`zvtools index-faces` adds it)            |
+| uncompressed cells, one per stored chunk (sharded or not)            | byte-range reads of rows (bridges, faces, neighbours) | whole cells                                                 |
+| `sharding_indexed`                                                   | ranges of one shard read together are merged          | one request per cell                                        |
+| server directory listing                                             | cross-chunk links found by listing `links/0/`         | edges: the 26 neighbours are probed; faces: missing, warned |
+| `nonempty_chunks`                                                    | empty cells skipped without a request                 | a request that finds nothing                                |
+| zarr-vectors-tools `skeleton_layout`                                 | skeleton layout known                                 | inferred                                                    |
+| `fragment_attributes/segment_id`                                     | segment ids read directly                             | taken from the level's manifests                            |
+
+A feature is trusted only where the data bears it out: a declared face group
+whose rows index another fragment, or whose count does not match the
+fragments, sends that chunk back to the whole-cell read with a console
+warning.
+
 ## Format support
 
 Read through each array's own `zarr.json` (`zarr_array.ts`):
@@ -108,20 +135,18 @@ Read through each array's own `zarr.json` (`zarr_array.ts`):
   chunk or across chunks) names another. zarr-vectors-tools'
   `skeleton_layout` marker (`linked_across_chunks`, `split_at_chunk_faces`)
   is honoured; without it, the layout is inferred.
-- Fragments without a stored `segment_id` get their object from the level's
-  manifests.
 
 Meshes: the `meshes` subsource is a Neuroglancer multiscale mesh
 (`mesh_lod.ts`). Level 0 and each following pyramid level whose chunks are
 twice the previous level's and which stores faces is a level of detail, as
 zarr-vectors-tools builds with `zvtools pyramid --method mesh_decimate
---coarsen 4,4 --chunk-scale 2,2`; other stores use level 0 alone. An octree
-node is one chunk of a level, and its fragment is the object's faces stored in
-that chunk, including faces that reach into neighbours (found by listing
-`links/0/`; on a server without listing they are missing, with a warning).
-Chunks mix every object's faces, so an object drawn at full resolution reads
-the whole face cell of each chunk it passes through. The dense overview draws
-a mesh store's vertices and reads no faces.
+--coarsen 2,2,2 --chunk-scale 2,2,2`; other stores use level 0 alone. An
+octree node is one chunk of a level, and its fragment is the object's faces
+stored in that chunk, including faces that reach into neighbours. Chunks hold
+every object's faces; where a level declares one face group per vertex
+fragment, an object's faces and vertices are read alone, by byte range,
+otherwise the whole cell is read and filtered. The dense overview draws a mesh
+store's vertices and reads no faces.
 
 Not read yet (reported once in the console):
 

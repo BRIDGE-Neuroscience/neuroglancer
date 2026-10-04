@@ -22,6 +22,11 @@
  */
 
 import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/base.js";
+import type { ElementType } from "#src/datasource/zarr-vectors/dtype.js";
+import {
+  decodeFloat32,
+  ELEMENT_BYTES,
+} from "#src/datasource/zarr-vectors/dtype.js";
 import type {
   ZarrVectorsLevel,
   ZarrVectorsStoreAccess,
@@ -34,6 +39,11 @@ import {
 function parseChunkKey(chunkKey: string): number[] {
   return chunkKey.split(".").map(Number);
 }
+
+/** Rows this close together are read together. */
+const ROW_GAP = 4096;
+/** Past this many reads, the whole cell is cheaper. */
+const MAX_ROW_READS = 16;
 
 export class LevelCells {
   private readers = new Map<string, Promise<ZarrArrayReader | undefined>>();
@@ -118,6 +128,17 @@ export class LevelCells {
     return payload?.byteLength === 0 ? undefined : payload;
   }
 
+  /** See {@link ZarrArrayReader.cellPayloadLength}. */
+  async cellPayloadLength(
+    path: string,
+    chunkKey: string,
+    signal: AbortSignal,
+  ): Promise<number | null> {
+    const reader = await this.reader(path);
+    if (reader === undefined) return 0;
+    return reader.cellPayloadLength(parseChunkKey(chunkKey), signal);
+  }
+
   /** See {@link ZarrArrayReader.readCellRange}. */
   async readCellRange(
     path: string,
@@ -134,6 +155,64 @@ export class LevelCells {
       length,
       signal,
     );
+  }
+
+  /**
+   * Positions of vertex rows `rows` (sorted, distinct) of a chunk: read by
+   * byte range where the cell allows it (uncompressed, one cell per stored
+   * chunk), else decoded from `whole()`, the whole cell.
+   */
+  async vertexRows(
+    chunkKey: string,
+    type: ElementType,
+    rows: readonly number[],
+    signal: AbortSignal,
+    whole: () => Promise<Uint8Array | undefined>,
+  ): Promise<Map<number, Float32Array>> {
+    const found = new Map<number, Float32Array>();
+    const rowBytes = 3 * ELEMENT_BYTES[type];
+    const spans: [number, number][] = [];
+    for (const v of rows) {
+      const last = spans[spans.length - 1];
+      if (last !== undefined && v - last[1] <= ROW_GAP) last[1] = v;
+      else spans.push([v, v]);
+    }
+    const reads =
+      spans.length > MAX_ROW_READS
+        ? null
+        : await Promise.all(
+            spans.map(([first, last]) =>
+              this.readCellRange(
+                "vertices",
+                chunkKey,
+                first * rowBytes,
+                (last - first + 1) * rowBytes,
+                signal,
+              ),
+            ),
+          );
+    if (reads !== null && reads.every((r) => r !== null)) {
+      reads.forEach((bytes, s) => {
+        if (bytes === undefined) return;
+        const [first, last] = spans[s];
+        const values = decodeFloat32(bytes, type, 3 * (last - first + 1));
+        for (let v = first; v <= last; ++v) {
+          found.set(v, values.subarray(3 * (v - first), 3 * (v - first) + 3));
+        }
+      });
+      return found;
+    }
+    const bytes = await whole();
+    if (bytes === undefined) return found;
+    const all = decodeFloat32(
+      bytes,
+      type,
+      bytes.byteLength / ELEMENT_BYTES[type],
+    );
+    for (const v of rows) {
+      if (3 * v + 3 <= all.length) found.set(v, all.subarray(3 * v, 3 * v + 3));
+    }
+    return found;
   }
 
   /** False when the array's `nonempty_chunks` rules the cell out. */

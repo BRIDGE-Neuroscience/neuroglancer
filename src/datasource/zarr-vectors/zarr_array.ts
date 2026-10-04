@@ -702,6 +702,39 @@ export class ZarrArrayReader {
   }
 
   /**
+   * Payload length of the variable-length element at `cell`, from its
+   * header alone (or the shard index): `null` when the array is not
+   * range-addressable (see {@link readCellRange}), 0 when the cell is empty.
+   */
+  async cellPayloadLength(
+    cell: ArrayLike<number>,
+    signal?: AbortSignal,
+  ): Promise<number | null> {
+    const { array } = this;
+    if (
+      array.elementType !== "vlen" ||
+      !array.raw ||
+      array.readChunkShape.some((n) => n !== 1)
+    ) {
+      return null;
+    }
+    if (!this.mayHaveCell(cell)) return 0;
+    const element = this.cellToElement(cell);
+    if (element === undefined) return 0;
+    const location = await this.locate(element, signal);
+    if (location === undefined) return 0;
+    if (location.range !== undefined) {
+      return Math.max(0, location.range.length - VLEN_SINGLE_HEADER);
+    }
+    const header = await this.read(location.key, {
+      signal,
+      byteRange: { offset: 0, length: VLEN_SINGLE_HEADER },
+    });
+    if (header === undefined || header.length < VLEN_SINGLE_HEADER) return 0;
+    return new DataView(header.buffer, header.byteOffset, 8).getUint32(4, true);
+  }
+
+  /**
    * Reads bytes `[offset, offset + length)` of the payload of the
    * variable-length element at `cell` WITHOUT fetching the rest of the cell.
    * Only possible for a raw array whose read chunk holds exactly one element

@@ -125,6 +125,7 @@
         "scene": {
           "coordinateSystems": [
             {
+              "id": "world",
               "name": "world",
               "axes": [
                 {
