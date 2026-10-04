@@ -88,6 +88,21 @@ The coarsest level stands in while it loads. A level without a vertex count
 neighbours; a coarse level known to be empty is not used; a flat store (one
 plane) is measured as one stored unit thick.
 
+Additive pyramids. A level whose metadata says `refinement: "add"` holds
+only what the coarser levels do not: its complete content is its own data
+and the next coarser level's complete content (zarr-vectors-tools builds
+these with `zvtools pyramid --refinement add`; the store lists
+`additive_levels` in `required_capabilities`, and a store that requires
+anything this viewer does not implement is refused). Each view then draws
+the chosen level together with every coarser level it adds to, coarse
+first, with the vertex budget counting all of them; finer data is added as
+it loads rather than replacing what is drawn. `objects` reads each object
+from every level of level 0's chain. `meshes` cannot use Neuroglancer's
+levels of detail for an additive pyramid, so it draws each object whole,
+from every level, as a single level of detail (with a warning); in a
+replacement pyramid a level that adds to the next is not used as a level of
+detail.
+
 ## What a store needs
 
 To open, a store needs only what zarr-vectors-py 0.9.x writes for any

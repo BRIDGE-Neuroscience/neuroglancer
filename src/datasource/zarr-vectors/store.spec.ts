@@ -22,7 +22,11 @@
 
 import { describe, expect, it } from "vitest";
 import { LevelPipeline } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
-import { ObjectReader } from "#src/datasource/zarr-vectors/object_reader.js";
+import { levelDensities } from "#src/datasource/zarr-vectors/dense_lod.js";
+import {
+  mergeSkeletons,
+  ObjectReader,
+} from "#src/datasource/zarr-vectors/object_reader.js";
 import {
   readObjectTable,
   readSegmentProperties,
@@ -30,6 +34,7 @@ import {
 import {
   chunkIndexBounds,
   kvStoreAccess,
+  levelChain,
   openZarrVectorsStore,
   safeAttributeId,
 } from "#src/datasource/zarr-vectors/store.js";
@@ -432,6 +437,30 @@ describe("edge cases", () => {
     expect(table!.segmentIds.length).toBe(expected.point_object_ids.length);
   });
 
+  it("refuses a store that requires what it does not implement", async () => {
+    const withRequired = (required: string[]) => {
+      const base = access("poly_raw");
+      return {
+        ...base,
+        read: async (path: string, options: any) => {
+          const bytes = await base.read(path, options);
+          if (bytes === undefined || path !== "zarr.json") return bytes;
+          const json = JSON.parse(new TextDecoder().decode(bytes));
+          json.attributes.zarr_vectors.required_capabilities = required;
+          return new TextEncoder().encode(JSON.stringify(json));
+        },
+      };
+    };
+    await expect(
+      openZarrVectorsStore(withRequired(["teleportation"]), undefined),
+    ).rejects.toThrow(/requires teleportation/);
+    const store = await openZarrVectorsStore(
+      withRequired(["additive_levels"]),
+      undefined,
+    );
+    expect(store.levels[0].refinement).toBe("replace");
+  });
+
   it("counts a vertex on the upper bound as inside", () => {
     const { lowerChunkBound, upperChunkBound } = chunkIndexBounds(
       [-16, 0, 1],
@@ -476,6 +505,124 @@ describe("edge cases", () => {
       ]);
       expect(Array.from(b!)).toEqual([50, 51, 52]);
       expect(Array.from(suffix!)).toEqual([96, 97, 98, 99]);
+    }
+  });
+});
+
+describe("additive pyramids", () => {
+  // The same streamlines as a replacement pyramid and as an additive one
+  // (zvtools pyramid --refinement add): each additive level's chain must
+  // show exactly what the replacement level shows.
+  const point = (p: ArrayLike<number>, v: number) =>
+    [0, 1, 2].map((d) => p[3 * v + d].toFixed(4)).join(",");
+  const edgeSet = (positions: ArrayLike<number>, edges: ArrayLike<number>) => {
+    const out: string[] = [];
+    for (let e = 0; e < edges.length; e += 2) {
+      out.push(
+        [point(positions, edges[e]), point(positions, edges[e + 1])]
+          .sort()
+          .join("|"),
+      );
+    }
+    return out.sort();
+  };
+
+  it("are read as chains of levels", async () => {
+    const store = await open("add_additive");
+    expect(store.levels.map((l) => l.refinement)).toEqual([
+      "add",
+      "add",
+      "replace",
+    ]);
+    expect(store.levels.map((_, i) => levelChain(store.levels, i))).toEqual([
+      [0, 1, 2],
+      [1, 2],
+      [2],
+    ]);
+    const replace = await open("add_replace");
+    const densities = (s: typeof store) =>
+      levelDensities(s.levels, s.lowerBounds, s.upperBounds);
+    expect(densities(store)).toEqual(densities(replace));
+  });
+
+  it("give every object whole, from whichever level stores it", async () => {
+    const additive = await open("add_additive");
+    const replace = await open("add_replace");
+    const readers = additive.levels.map(
+      (level) =>
+        new ObjectReader(access("add_additive"), additive.description, level),
+    );
+    const whole = new ObjectReader(
+      access("add_replace"),
+      replace.description,
+      replace.levels[0],
+    );
+    const stored = new Set<number>();
+    for (let id = 0; id < 24; ++id) {
+      const parts = await Promise.all(
+        readers.map((r) => r.readSkeleton(BigInt(id), signal)),
+      );
+      parts.forEach((p, level) => {
+        if (p.positions.length > 0) stored.add(level);
+      });
+      expect(parts.filter((p) => p.positions.length > 0).length, `${id}`).toBe(
+        1,
+      );
+      const merged = mergeSkeletons(parts);
+      const want = await whole.readSkeleton(BigInt(id), signal);
+      expect(edgeSet(merged.positions, merged.edges), `object ${id}`).toEqual(
+        edgeSet(want.positions, want.edges),
+      );
+    }
+    expect([...stored].sort()).toEqual([0, 1, 2]);
+  });
+
+  it("draw each level's view from its chain, as the replacement level", async () => {
+    const additive = await open("add_additive");
+    const replace = await open("add_replace");
+    const dense = async (
+      name: string,
+      store: typeof additive,
+      levels: number[],
+    ) => {
+      const edges: string[] = [];
+      let own = 0;
+      for (const index of levels) {
+        const level = store.levels[index];
+        const pipeline = new LevelPipeline(
+          access(name),
+          store.description,
+          level,
+        );
+        const { shape } = level.arrays.vertices;
+        const origin = level.arrays.vertices.attributes.chunk_grid_origin ?? [
+          0, 0, 0,
+        ];
+        for (let i = 0; i < shape[0]; ++i) {
+          for (let j = 0; j < shape[1]; ++j) {
+            for (let k = 0; k < shape[2]; ++k) {
+              const chunk = await pipeline.download(
+                [i + origin[0], j + origin[1], k + origin[2]],
+                signal,
+              );
+              if (chunk === undefined) continue;
+              own += chunk.numOwnVertices;
+              edges.push(...edgeSet(chunk.positions, chunk.edges));
+            }
+          }
+        }
+      }
+      return { own, edges: edges.sort() };
+    };
+    for (let index = 0; index < 3; ++index) {
+      const got = await dense(
+        "add_additive",
+        additive,
+        levelChain(additive.levels, index),
+      );
+      const want = await dense("add_replace", replace, [index]);
+      expect(got.own, `level ${index}`).toBe(want.own);
+      expect(got.edges, `level ${index}`).toEqual(want.edges);
     }
   });
 });

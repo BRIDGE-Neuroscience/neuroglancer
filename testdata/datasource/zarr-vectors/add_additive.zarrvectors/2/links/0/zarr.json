@@ -1,0 +1,14 @@
+{
+  "attributes": {
+    "zv_array": "links_family",
+    "level_delta": 0,
+    "link_width": 2,
+    "directed": true,
+    "store": "canonical",
+    "sid_ndim": 3,
+    "num_links": 39,
+    "num_physical_records": 39
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

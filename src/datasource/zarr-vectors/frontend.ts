@@ -64,6 +64,7 @@ import type {
 import {
   chunkIndexBounds,
   formatAttributesFragment,
+  levelChain,
   kvStoreAccess,
   openZarrVectorsStore,
   parseAttributesFragment,
@@ -116,6 +117,27 @@ async function meshSubsource(
   warnings: string[],
   signal: AbortSignal | undefined,
 ): Promise<DataSubsourceEntry> {
+  if (store.levels[0].refinement === "add") {
+    // Additive: an object is the union of its parts at level 0's chain,
+    // which Neuroglancer's levels of detail cannot express; one level of
+    // detail on the coarsest chain level's grid holds them all.
+    const levels = levelChain(store.levels, 0).map((i) => store.levels[i]);
+    warnings.push(
+      "additive mesh pyramid: meshes are drawn whole from every level, " +
+        "without levels of detail",
+    );
+    return meshSubsourceEntry(chunkManager, context, {
+      storeUrl,
+      description: store.description,
+      levels,
+      gridOffset: meshGridOffset(
+        store.lowerBounds,
+        levels[levels.length - 1].chunkShape,
+        1,
+      ),
+      union: true,
+    });
+  }
   const { levels, unused } = await meshLevels(
     store.levels,
     async (level) =>
@@ -132,7 +154,7 @@ async function meshSubsource(
         "(zvtools pyramid --chunk-scale 2,2)",
     );
   }
-  const parameters = Object.assign(new ZarrVectorsMeshSourceParameters(), {
+  return meshSubsourceEntry(chunkManager, context, {
     storeUrl,
     description: store.description,
     levels,
@@ -141,7 +163,19 @@ async function meshSubsource(
       levels[0].chunkShape,
       levels.length,
     ),
+    union: false,
   });
+}
+
+function meshSubsourceEntry(
+  chunkManager: ChunkManager,
+  context: SharedKvStoreContext,
+  fields: ZarrVectorsMeshSourceParameters,
+): DataSubsourceEntry {
+  const parameters = Object.assign(
+    new ZarrVectorsMeshSourceParameters(),
+    fields,
+  );
   return {
     id: "meshes",
     default: true,
@@ -170,11 +204,14 @@ async function buildDataSource(
   const { description, lowerBounds, upperBounds } = store;
   // A coarse level that is known to hold nothing would be drawn as the
   // zoomed-out view and the loading stand-in, showing nothing.
+  // An empty level that completes an additive one below it is kept: the
+  // level below adds to it, not past it.
   const levels = store.levels.filter(
-    (level, i) =>
+    (level, i, all) =>
       i === 0 ||
       level.vertexCount !== 0 ||
-      level.arrays.vertices.attributes?.nonempty_chunks?.length !== 0,
+      level.arrays.vertices.attributes?.nonempty_chunks?.length !== 0 ||
+      (all[i - 1].refinement === "add" && level.refinement !== "add"),
   );
   const warnings = [...store.warnings];
 
@@ -221,6 +258,7 @@ async function buildDataSource(
       ),
     })),
     levelDensities(levels, lowerBounds, upperBounds),
+    levels.map((_, i) => levelChain(levels, i)),
   );
   const subsources: DataSubsourceEntry[] = [
     // Not one of Neuroglancer's mesh kinds: the zarr-vectors segmentation
@@ -237,7 +275,13 @@ async function buildDataSource(
       })
     : undefined;
   if (table !== undefined) {
-    const params = { storeUrl, description, level: levels[0] };
+    const params = {
+      storeUrl,
+      description,
+      level: levels[0],
+      // In an additive pyramid an object's parts sit at several levels.
+      levels: levelChain(store.levels, 0).map((i) => store.levels[i]),
+    };
     subsources.push(
       KIND_CAPABILITIES[description.geometryKind].primitive === "triangles"
         ? await meshSubsource(

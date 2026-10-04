@@ -17,6 +17,7 @@
 import { describe, expect, it } from "vitest";
 import { levelDensities } from "#src/datasource/zarr-vectors/dense_lod.js";
 import { rowSpans } from "#src/datasource/zarr-vectors/level_cells.js";
+import { levelChain } from "#src/datasource/zarr-vectors/store.js";
 
 const level = (vertexCount: number | undefined, chunk: number) => ({
   vertexCount,
@@ -56,6 +57,45 @@ describe("levelDensities", () => {
     );
     expect(d.every((x) => Number.isFinite(x) && x > 0)).toBe(true);
     expect(d[0]).toBeCloseTo(4 * d[1]);
+  });
+});
+
+describe("additive levels", () => {
+  const add = (vertexCount: number, chunk: number) => ({
+    ...level(vertexCount, chunk),
+    refinement: "add" as const,
+  });
+
+  it("chain each additive level to the coarser ones it adds to", () => {
+    const replace = (vertexCount: number, chunk: number) => ({
+      ...level(vertexCount, chunk),
+      refinement: "replace" as const,
+    });
+    const levels = [
+      add(1, 16),
+      add(1, 32),
+      replace(1, 64),
+      add(1, 128),
+      replace(1, 256),
+    ];
+    expect(levels.map((_, i) => levelChain(levels, i))).toEqual([
+      [0, 1, 2],
+      [1, 2],
+      [2],
+      [3, 4],
+      [4],
+    ]);
+  });
+
+  it("count a level's view as its own vertices and the coarser ones'", () => {
+    // Each level holds what the coarser ones do not: 6000 = 1000 + 2000 + 3000.
+    const d = levelDensities(
+      [add(3000, 16), add(2000, 32), level(1000, 64)],
+      box.lower,
+      box.upper,
+    );
+    const v = 1e6;
+    expect(d.map((x) => Math.round(x * v))).toEqual([6000, 3000, 1000]);
   });
 });
 

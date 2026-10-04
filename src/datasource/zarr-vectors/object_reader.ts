@@ -74,6 +74,45 @@ export interface ObjectSkeleton {
   attributes: Float32Array[];
 }
 
+/**
+ * One skeleton from parts read at several levels (an additive pyramid keeps
+ * each part of an object at one level): vertices concatenated, edges
+ * renumbered, attributes (and the tangent) concatenated alike.
+ */
+export function mergeSkeletons(
+  parts: readonly ObjectSkeleton[],
+): ObjectSkeleton {
+  const used = parts.filter((p) => p.positions.length > 0);
+  if (used.length === 1) return used[0];
+  if (used.length === 0) return parts[0];
+  const numVertices = used.reduce((n, p) => n + p.positions.length / 3, 0);
+  const positions = new Float32Array(3 * numVertices);
+  const edges = new Uint32Array(used.reduce((n, p) => n + p.edges.length, 0));
+  const attributes = used[0].attributes.map(
+    (_, k) =>
+      new Float32Array(
+        used.reduce((n, p) => n + (p.attributes[k]?.length ?? 0), 0),
+      ),
+  );
+  let vertexAt = 0;
+  let edgeAt = 0;
+  const attributeAt = attributes.map(() => 0);
+  for (const p of used) {
+    positions.set(p.positions, 3 * vertexAt);
+    for (let i = 0; i < p.edges.length; ++i) {
+      edges[edgeAt + i] = p.edges[i] + vertexAt;
+    }
+    edgeAt += p.edges.length;
+    p.attributes.forEach((a, k) => {
+      if (k >= attributes.length) return;
+      attributes[k].set(a, attributeAt[k]);
+      attributeAt[k] += a.length;
+    });
+    vertexAt += p.positions.length / 3;
+  }
+  return { positions, edges, attributes };
+}
+
 /** One object's vertices in each chunk it visits, in manifest (walk) order. */
 interface ObjectParts {
   order: { chunkKey: string; vertices: number[] }[];

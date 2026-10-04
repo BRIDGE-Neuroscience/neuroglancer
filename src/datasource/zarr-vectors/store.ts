@@ -90,6 +90,13 @@ export interface ZarrVectorsLevel {
    * link group per vertex fragment, in fragment order.
    */
   fragmentLinkGroups: boolean;
+  /**
+   * How the level relates to the next coarser one: `"replace"`, a complete
+   * representation on its own, or `"add"`, the data the coarser levels do
+   * not hold (its complete content is its own and the next level's).
+   * `vertexCount` counts the level's own vertices either way.
+   */
+  refinement: "replace" | "add";
   arrays: ZarrVectorsLevelArrays;
 }
 
@@ -255,6 +262,20 @@ function checkFormat(zv: any, warnings: string[]) {
       );
     }
   }
+  // A store lists what a reader must understand to read it correctly; an
+  // unknown one would be read wrongly without a word, so it is refused.
+  const required = zv?.required_capabilities;
+  if (Array.isArray(required)) {
+    const unknown = required.filter(
+      (c: unknown) => !SUPPORTED_REQUIRED_CAPABILITIES.has(String(c)),
+    );
+    if (unknown.length > 0) {
+      throw new Error(
+        `this store requires ${unknown.join(", ")}, which this viewer does ` +
+          "not implement",
+      );
+    }
+  }
   const capabilities = zv?.format_capabilities;
   if (Array.isArray(capabilities) && capabilities.includes("dense_manifests")) {
     warnings.push(
@@ -262,6 +283,28 @@ function checkFormat(zv: any, warnings: string[]) {
         "selected objects and segment properties are unavailable",
     );
   }
+}
+
+/** `required_capabilities` this viewer implements. */
+const SUPPORTED_REQUIRED_CAPABILITIES = new Set(["additive_levels"]);
+
+/**
+ * The levels whose union is level `index`'s complete content: itself, and,
+ * while a level is `refinement: "add"`, the next coarser one too.
+ */
+export function levelChain(
+  levels: readonly { refinement?: ZarrVectorsLevel["refinement"] }[],
+  index: number,
+): number[] {
+  const out = [index];
+  for (
+    let i = index;
+    i + 1 < levels.length && levels[i].refinement === "add";
+    ++i
+  ) {
+    out.push(i + 1);
+  }
+  return out;
 }
 
 /** Throws unless the object index layout is one this reader resolves. */
@@ -575,6 +618,7 @@ async function readLevel(
         : rootChunkShape,
     vertexCount: Number.isFinite(vertexCount) ? vertexCount : undefined,
     fragmentLinkGroups: meta.fragment_link_groups === true,
+    refinement: meta.refinement === "add" ? "add" : "replace",
     arrays: {
       vertices,
       vertexFragments,

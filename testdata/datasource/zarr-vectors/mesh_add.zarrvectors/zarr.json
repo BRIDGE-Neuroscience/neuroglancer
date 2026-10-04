@@ -1,0 +1,148 @@
+{
+  "attributes": {
+    "zarr_vectors": {
+      "zv_version": "0.9.3",
+      "format_capabilities": [
+        "fragment_link_groups",
+        "additive_levels"
+      ],
+      "chunk_shape": [
+        16.0,
+        16.0,
+        16.0
+      ],
+      "bounds": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          64,
+          48,
+          40
+        ]
+      ],
+      "geometry_types": [
+        "mesh"
+      ],
+      "links_convention": "explicit",
+      "object_index_convention": "standard",
+      "cross_chunk_strategy": "explicit_links",
+      "cross_level_depth": 0,
+      "cross_level_storage": "none",
+      "required_capabilities": [
+        "additive_levels"
+      ]
+    },
+    "multiscales": [
+      {
+        "version": "0.4",
+        "name": "default",
+        "axes": [
+          {
+            "name": "x",
+            "type": "space"
+          },
+          {
+            "name": "y",
+            "type": "space"
+          },
+          {
+            "name": "z",
+            "type": "space"
+          }
+        ],
+        "datasets": [
+          {
+            "path": "0",
+            "coordinateTransformations": [
+              {
+                "type": "scale",
+                "scale": [
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "type": "translation",
+                "translation": [
+                  8.0,
+                  8.0,
+                  8.0
+                ]
+              }
+            ]
+          },
+          {
+            "path": "1",
+            "coordinateTransformations": [
+              {
+                "type": "scale",
+                "scale": [
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "type": "translation",
+                "translation": [
+                  8.0,
+                  8.0,
+                  8.0
+                ]
+              }
+            ]
+          }
+        ],
+        "metadata": {
+          "format": "zarr_vectors"
+        }
+      }
+    ],
+    "ome": {
+      "version": "0.6",
+      "type": "collection",
+      "name": "mesh_add",
+      "attributes": {
+        "scene": {
+          "coordinateSystems": [
+            {
+              "id": "world",
+              "name": "world",
+              "axes": [
+                {
+                  "name": "x",
+                  "type": "space"
+                },
+                {
+                  "name": "y",
+                  "type": "space"
+                },
+                {
+                  "name": "z",
+                  "type": "space"
+                }
+              ]
+            }
+          ],
+          "coordinateTransformations": []
+        }
+      },
+      "nodes": [
+        {
+          "type": "zv:level",
+          "name": "0"
+        },
+        {
+          "type": "zv:level",
+          "name": "1"
+        }
+      ]
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

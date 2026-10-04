@@ -1,0 +1,12 @@
+{
+  "attributes": {
+    "zv_array": "object_index",
+    "num_objects": 24,
+    "sid_ndim": 3,
+    "layout": "vlen_manifests_v2",
+    "num_present": 6,
+    "object_ids_sorted": true
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

@@ -30,7 +30,9 @@ import { getOctreeChildIndex, zorder3LessThan } from "#src/util/zorder.js";
 
 /**
  * The levels to use as levels of detail: level 0, then each next level while
- * its chunks are exactly twice the last's and it stores faces.
+ * its chunks are exactly twice the last's, it stores faces, and it is
+ * complete on its own (not `refinement: "add"`, whose view needs the coarser
+ * levels too).
  */
 export async function meshLevels(
   levels: readonly ZarrVectorsLevel[],
@@ -42,7 +44,13 @@ export async function meshLevels(
     const doubles = levels[i].chunkShape.every(
       (c, d) => Math.abs(c - 2 * prev[d]) <= 1e-6 * c,
     );
-    if (!doubles || !(await hasFaces(levels[i]))) break;
+    if (
+      !doubles ||
+      levels[i].refinement === "add" ||
+      !(await hasFaces(levels[i]))
+    ) {
+      break;
+    }
     out.push(levels[i]);
   }
   return { levels: out, unused: levels.length - out.length };
@@ -124,6 +132,30 @@ export function buildMeshOctree(nodesByLod: readonly (readonly number[][])[]): {
       return { octree: Uint32Array.from(rows), numLods: lod + 1 };
     }
   }
+}
+
+/**
+ * An additive pyramid's object as one level of detail: each node is a chunk
+ * of `baseChunk` (the coarsest level's), holding the object's chunks of
+ * every level that lie in it, as `[level, chunk]`, keyed by node.
+ */
+export function unionMeshNodes(
+  chunksPerLevel: readonly (readonly number[][])[],
+  levelChunkShapes: readonly (readonly number[])[],
+  baseChunk: readonly number[],
+): Map<string, [number, number[]][]> {
+  const members = new Map<string, [number, number[]][]>();
+  chunksPerLevel.forEach((coords, level) => {
+    const size = levelChunkShapes[level];
+    for (const c of coords) {
+      const node = c.map((x, d) => Math.floor((x * size[d]) / baseChunk[d]));
+      const key = node.join();
+      let list = members.get(key);
+      if (list === undefined) members.set(key, (list = []));
+      list.push([level, [...c]]);
+    }
+  });
+  return members;
 }
 
 /** What one object's multiscale mesh manifest needs. */

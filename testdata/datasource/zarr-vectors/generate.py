@@ -244,6 +244,50 @@ def main():
         # and the pyramid stamps the levels it writes, so every level keeps
         # one face group per object.
 
+    # One set of streamlines as two pyramids: replacement, and additive
+    # (each object stored once, at the coarsest level that keeps it). The
+    # union of an additive level's chain must equal the replacement level.
+    if ZVTOOLS:
+        walks = [
+            (np.cumsum(rng.normal(scale=2.5, size=(16 + 2 * i, 3)), axis=0)
+             + rng.random(3) * 40 + 12).astype("float32")
+            for i in range(24)
+        ]
+        walks = [np.clip(w, 0.5, 63.5) for w in walks]
+        for name, refinement in (("add_replace", []), ("add_additive", ["--refinement", "add"])):
+            write_polylines(
+                fresh(name),
+                walks,
+                chunk_shape=(32.0, 32.0, 32.0),
+                bounds=([0, 0, 0], [64, 64, 64]),
+                object_attributes={
+                    "length": np.array([len(w) for w in walks], dtype="float32"),
+                },
+            )
+            subprocess.run(
+                [ZVTOOLS, "pyramid", path(name), "--coarsen", "1,1",
+                 "--sparsity", "2,2", "--sparsity-strategy", "length",
+                 "--method", "polyline", *refinement],
+                check=True,
+            )
+        # A mesh pyramid stored additively: the viewer draws it as one level
+        # of detail holding each object's parts from every level.
+        write_mesh(
+            fresh("mesh_add"),
+            lod_positions,
+            lod_faces,
+            chunk_shape=(16.0, 16.0, 16.0),
+            object_ids=lod_object_ids,
+            bounds=([0, 0, 0], [64, 48, 40]),
+            encoding="raw",
+        )
+        subprocess.run(
+            [ZVTOOLS, "pyramid", path("mesh_add"), "--coarsen", "1",
+             "--sparsity", "2", "--sparsity-strategy", "random",
+             "--chunk-scale", "2", "--method", "mesh", "--refinement", "add"],
+            check=True,
+        )
+
     expected = {
         "mesh_lod": {
             "positions": lod_positions.tolist(),

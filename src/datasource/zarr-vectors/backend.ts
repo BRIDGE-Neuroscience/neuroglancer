@@ -39,8 +39,12 @@ import { forEachDenseChunkToLoad } from "#src/datasource/zarr-vectors/dense_lod.
 import {
   objectMeshLayout,
   partitionMeshFragment,
+  unionMeshNodes,
 } from "#src/datasource/zarr-vectors/mesh_lod.js";
-import { ObjectReader } from "#src/datasource/zarr-vectors/object_reader.js";
+import {
+  mergeSkeletons,
+  ObjectReader,
+} from "#src/datasource/zarr-vectors/object_reader.js";
 import type { ZarrVectorsStoreAccess } from "#src/datasource/zarr-vectors/store.js";
 import { kvStoreAccess } from "#src/datasource/zarr-vectors/store.js";
 import type { SharedKvStoreContextCounterpart } from "#src/kvstore/backend.js";
@@ -203,21 +207,25 @@ export class ZarrVectorsObjectSkeletonSourceBackend extends WithParameters(
   WithSharedKvStoreContextCounterpart(SkeletonSource),
   ZarrVectorsObjectSkeletonSourceParameters,
 ) {
-  private reader_: ObjectReader | undefined;
-  private get reader() {
-    if (this.reader_ === undefined) {
-      const { storeUrl, description, level } = this.parameters;
-      this.reader_ = new ObjectReader(
-        storeAccess(this, storeUrl),
-        description,
-        level,
+  private readers_: ObjectReader[] | undefined;
+  /** One reader per level of level 0's chain. */
+  private get readers() {
+    if (this.readers_ === undefined) {
+      const { storeUrl, description, level, levels } = this.parameters;
+      const access = storeAccess(this, storeUrl);
+      this.readers_ = (levels ?? [level]).map(
+        (l) => new ObjectReader(access, description, l),
       );
     }
-    return this.reader_;
+    return this.readers_;
   }
 
   async download(chunk: SkeletonChunk, signal: AbortSignal) {
-    const skeleton = await this.reader.readSkeleton(chunk.objectId, signal);
+    const skeleton = mergeSkeletons(
+      await Promise.all(
+        this.readers.map((r) => r.readSkeleton(chunk.objectId, signal)),
+      ),
+    );
     chunk.vertexPositions = skeleton.positions;
     chunk.indices = skeleton.edges;
     chunk.vertexAttributes = skeleton.attributes;
@@ -244,8 +252,13 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
     return this.readers_;
   }
 
+  /**
+   * The octree's level-0 chunk: level 0's, or in an additive pyramid the
+   * coarsest level's, whose chunks hold every finer level's.
+   */
   private get baseChunk() {
-    return this.parameters.levels[0].chunkShape;
+    const { levels, union } = this.parameters;
+    return levels[union ? levels.length - 1 : 0].chunkShape;
   }
 
   /**
@@ -259,9 +272,9 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
     if (this.scales === undefined) {
       let failed = false;
       const promise = (async () => {
-        const { levels } = this.parameters;
+        const { levels, union } = this.parameters;
         const top = levels.length - 1;
-        if (top === 0) return Float32Array.of(1);
+        if (top === 0 || union) return Float32Array.of(1);
         const measured = await this.readers[top].meanEdgeLength().catch(() => {
           failed = true;
           return undefined;
@@ -298,8 +311,18 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
     );
     const scales = await this.lodScales();
     signal.throwIfAborted();
+    let perLevel = all;
+    if (this.parameters.union) {
+      const members = unionMeshNodes(
+        all,
+        this.parameters.levels.map((l) => l.chunkShape),
+        base,
+      );
+      unionMembers.set(chunk, members);
+      perLevel = [[...members.keys()].map((k) => k.split(",").map(Number))];
+    }
     const layout = objectMeshLayout(
-      all,
+      perLevel,
       base,
       this.parameters.gridOffset,
       scales,
@@ -330,11 +353,26 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
     const base = this.baseChunk;
     const grid = [0, 1, 2].map((d) => octree[row * 5 + d]);
     const size = base.map((c) => c * 2 ** lod);
-    const { positions, indices } = await this.readers[lod].readMeshNode(
-      manifestChunk.objectId,
-      grid.map((x, d) => x - offset[d] / 2 ** lod),
-      signal,
-    );
+    const node = grid.map((x, d) => x - offset[d] / 2 ** lod);
+    const union = unionMembers.get(manifestChunk);
+    const { positions, indices } =
+      union === undefined
+        ? await this.readers[lod].readMeshNode(
+            manifestChunk.objectId,
+            node,
+            signal,
+          )
+        : concatenateMeshes(
+            await Promise.all(
+              (union.get(node.join()) ?? []).map(([level, coords]) =>
+                this.readers[level].readMeshNode(
+                  manifestChunk.objectId,
+                  coords,
+                  signal,
+                ),
+              ),
+            ),
+          );
     assignMultiscaleMeshFragmentData(
       chunk,
       partitionMeshFragment(
@@ -351,6 +389,37 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
 
 /** The grid offset each object's manifest was built with. */
 const gridOffsets = new WeakMap<MultiscaleManifestChunk, number[]>();
+
+/**
+ * Additive pyramids: per object, the (level, chunk) parts each node of its
+ * single level of detail holds.
+ */
+const unionMembers = new WeakMap<
+  MultiscaleManifestChunk,
+  Map<string, [number, number[]][]>
+>();
+
+function concatenateMeshes(
+  parts: readonly { positions: Float32Array; indices: Uint32Array }[],
+) {
+  const positions = new Float32Array(
+    parts.reduce((n, p) => n + p.positions.length, 0),
+  );
+  const indices = new Uint32Array(
+    parts.reduce((n, p) => n + p.indices.length, 0),
+  );
+  let vertexAt = 0;
+  let indexAt = 0;
+  for (const p of parts) {
+    positions.set(p.positions, 3 * vertexAt);
+    for (let i = 0; i < p.indices.length; ++i) {
+      indices[indexAt + i] = p.indices[i] + vertexAt;
+    }
+    indexAt += p.indices.length;
+    vertexAt += p.positions.length / 3;
+  }
+  return { positions, indices };
+}
 
 // ------------------------------------------------------------ render layer
 
@@ -372,6 +441,7 @@ export class ZarrVectorsDenseRenderLayerBackend extends withChunkManager(
   renderScaleTarget2d: SharedWatchableValue<number>;
   renderScaleTarget3d: SharedWatchableValue<number>;
   densities: number[];
+  chains: number[][];
 
   /** The 3-D target, for code that treats this as a volumetric render layer. */
   get renderScaleTarget() {
@@ -384,6 +454,7 @@ export class ZarrVectorsDenseRenderLayerBackend extends withChunkManager(
     this.renderScaleTarget2d = rpc.get(options.renderScaleTarget2d);
     this.renderScaleTarget3d = rpc.get(options.renderScaleTarget3d);
     this.densities = options.densities;
+    this.chains = options.chains;
     const schedule = () => this.chunkManager.scheduleUpdateChunkPriorities();
     for (const value of [
       this.localPosition,
@@ -449,6 +520,7 @@ export class ZarrVectorsDenseRenderLayerBackend extends withChunkManager(
         this.localPosition.value,
         transformedSources[0],
         this.densities,
+        this.chains,
         renderScaleTarget,
         isSliceView,
         (tsource, _levelIndex, isTarget) => {

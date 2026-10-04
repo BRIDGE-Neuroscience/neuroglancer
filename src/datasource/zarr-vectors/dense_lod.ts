@@ -130,8 +130,11 @@ export function selectDenseLevel(
 }
 
 /**
- * Visits the chunks to load for a view: the target level's visible chunks,
- * then the coarsest level's as the stand-in while they load.
+ * Visits the chunks to load for a view: the visible chunks of every level
+ * the target level's view draws (`chains[target]`: the target itself, and
+ * the coarser levels an additive target adds to), coarsest first so what
+ * shows first is a whole view; then the coarsest level's as the stand-in
+ * while they load, unless the view draws it anyway.
  */
 export function forEachDenseChunkToLoad<
   Source extends TransformedSource<any, any>,
@@ -140,6 +143,7 @@ export function forEachDenseChunkToLoad<
   localPosition: Float32Array,
   transformedSources: readonly Source[],
   densities: readonly number[],
+  chains: readonly (readonly number[])[],
   renderScaleTarget: number,
   isSliceView: boolean,
   callback: (source: Source, levelIndex: number, isTarget: boolean) => void,
@@ -161,14 +165,23 @@ export function forEachDenseChunkToLoad<
       () => callback(tsource, levelIndex, isTarget),
     );
   };
-  visit(target, true);
+  const drawn = chains[target] ?? [target];
+  for (const level of [...drawn].reverse()) visit(level, true);
   const coarsest = transformedSources.length - 1;
-  if (coarsest !== target) visit(coarsest, false);
+  if (!drawn.includes(coarsest)) visit(coarsest, false);
 }
 
-/** Vertices per unit (stored) volume of each level, finest first. */
+/**
+ * Vertices per unit (stored) volume of what drawing each level shows, finest
+ * first: the level's own vertices, and for an additive level the next
+ * coarser level's complete content too.
+ */
 export function levelDensities(
-  levels: readonly { vertexCount: number | undefined; chunkShape: number[] }[],
+  levels: readonly {
+    vertexCount: number | undefined;
+    chunkShape: number[];
+    refinement?: "replace" | "add";
+  }[],
   lowerBounds: readonly number[],
   upperBounds: readonly number[],
 ): number[] {
@@ -176,15 +189,24 @@ export function levelDensities(
   for (let i = 0; i < lowerBounds.length; ++i) {
     volume *= Math.max(upperBounds[i] - lowerBounds[i], MIN_EXTENT);
   }
+  const n = levels.length;
+  const adds = (i: number) => levels[i].refinement === "add" && i + 1 < n;
   // A count of 0 is a writer's placeholder as often as a fact, so it is
-  // treated as unknown. An unknown level is estimated from a known
-  // neighbour, assuming density falls with the cube of the chunk growth (or
-  // halves when chunks do not grow); with no count at all, from a guess.
-  const known = levels.map(({ vertexCount }) =>
+  // treated as unknown.
+  const own = levels.map(({ vertexCount }) =>
     vertexCount !== undefined && vertexCount > 0
       ? vertexCount / volume
       : undefined,
   );
+  const known: (number | undefined)[] = new Array(n).fill(undefined);
+  for (let i = n - 1; i >= 0; --i) {
+    if (own[i] === undefined) continue;
+    if (!adds(i)) known[i] = own[i];
+    else if (known[i + 1] !== undefined) known[i] = own[i]! + known[i + 1]!;
+  }
+  // An unknown level is estimated from a known neighbour, assuming density
+  // falls with the cube of the chunk growth (or halves when chunks do not
+  // grow); with no count at all, from a guess.
   const ratio = (finer: number) => {
     const growth =
       prod3(levels[finer + 1].chunkShape as any) /
@@ -198,11 +220,16 @@ export function levelDensities(
   } else {
     for (let i = firstKnown - 1; i >= 0; --i) out[i] = out[i + 1]! * ratio(i);
   }
-  for (let i = 1; i < levels.length; ++i) {
+  for (let i = 1; i < n; ++i) {
     out[i] ??= out[i - 1]! / ratio(i - 1);
   }
+  // An additive level's own count adds to the next level's, however that
+  // was found.
+  for (let i = n - 2; i >= 0; --i) {
+    if (adds(i) && own[i] !== undefined) out[i] = own[i]! + out[i + 1]!;
+  }
   // Coarser levels never hold more per unit volume than finer ones.
-  for (let i = levels.length - 2; i >= 0; --i) {
+  for (let i = n - 2; i >= 0; --i) {
     out[i] = Math.max(out[i]!, out[i + 1]!);
   }
   return out as number[];

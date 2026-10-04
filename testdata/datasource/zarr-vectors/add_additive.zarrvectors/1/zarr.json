@@ -1,0 +1,27 @@
+{
+  "attributes": {
+    "zarr_vectors_level": {
+      "level": 1,
+      "object_sparsity": 0.5,
+      "vertex_count": 270,
+      "coarsening_method": "polyline_rdp",
+      "parent_level": 0,
+      "arrays_present": [
+        "vertices",
+        "object_index",
+        "fragment_attributes"
+      ],
+      "preserves_object_ids": true,
+      "inherited_num_objects": 24,
+      "refinement": "add"
+    },
+    "zarr_vectors_tools": {
+      "coarsening": {
+        "rdp_tolerance": null,
+        "rdp_tolerance_source": "derived"
+      }
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

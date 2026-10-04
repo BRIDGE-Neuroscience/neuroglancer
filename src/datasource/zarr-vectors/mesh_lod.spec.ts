@@ -26,8 +26,12 @@ import {
   meshLevels,
   objectMeshLayout,
   partitionMeshFragment,
+  unionMeshNodes,
 } from "#src/datasource/zarr-vectors/mesh_lod.js";
-import { ObjectReader } from "#src/datasource/zarr-vectors/object_reader.js";
+import {
+  mergeSkeletons,
+  ObjectReader,
+} from "#src/datasource/zarr-vectors/object_reader.js";
 import { openZarrVectorsStore } from "#src/datasource/zarr-vectors/store.js";
 import {
   fixtureExpected,
@@ -286,6 +290,12 @@ describe("meshLevels and meshGridOffset", () => {
       levels: levels.slice(0, 2),
       unused: 2,
     });
+  });
+
+  it("does not use a level that adds to the next as a level of detail", async () => {
+    const all = async () => true;
+    const levels = [level(16), { ...level(32), refinement: "add" }, level(64)];
+    expect((await meshLevels(levels, all)).levels.length).toBe(1);
   });
 
   it("offsets negative chunks to non-negative, parent-aligned coordinates", () => {
@@ -566,3 +576,101 @@ describe("multi-resolution meshes from a zarr-vectors-tools pyramid", () => {
     }
   });
 });
+
+describe("mergeSkeletons", () => {
+  it("joins an object's parts from several levels", () => {
+    const merged = mergeSkeletons([
+      {
+        positions: Float32Array.of(0, 0, 0, 1, 0, 0),
+        edges: Uint32Array.of(0, 1),
+        attributes: [Float32Array.of(5, 6)],
+      },
+      {
+        positions: new Float32Array(0),
+        edges: new Uint32Array(0),
+        attributes: [new Float32Array(0)],
+      },
+      {
+        positions: Float32Array.of(2, 0, 0, 3, 0, 0, 4, 0, 0),
+        edges: Uint32Array.of(0, 1, 1, 2),
+        attributes: [Float32Array.of(7, 8, 9)],
+      },
+    ]);
+    expect(Array.from(merged.positions)).toEqual([
+      0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0,
+    ]);
+    expect(Array.from(merged.edges)).toEqual([0, 1, 2, 3, 3, 4]);
+    expect(Array.from(merged.attributes[0])).toEqual([5, 6, 7, 8, 9]);
+  });
+});
+
+describe("an additive mesh pyramid", () => {
+  const access = () => ({
+    read: fixtureRead("mesh_add"),
+    listDirectories: fixtureListDirectories("mesh_add"),
+    shardIndexes: new ShardIndexCache(),
+  });
+
+  it("draws each object whole, from the level that stores it", async () => {
+    const store = await openZarrVectorsStore(access(), undefined);
+    expect(store.levels.map((l) => l.refinement)).toEqual(["add", "replace"]);
+    const base = store.levels[1].chunkShape;
+    const readers = store.levels.map(
+      (level) => new ObjectReader(access(), store.description, level),
+    );
+    const levelsUsed = new Set<number>();
+    for (const object of [0n, 1n]) {
+      const all = await Promise.all(readers.map((r) => r.chunksOf(object)));
+      const nodes = unionMeshNodes(
+        all,
+        store.levels.map((l) => l.chunkShape),
+        base,
+      );
+      let faces = 0;
+      const edges = new Map<string, number>();
+      for (const [key, members] of nodes) {
+        const node = key.split(",").map(Number);
+        for (const [level, chunk] of members) {
+          levelsUsed.add(level);
+          // Each part lies in its node.
+          const size = store.levels[level].chunkShape;
+          for (let d = 0; d < 3; ++d) {
+            expect(chunk[d] * size[d]).toBeGreaterThanOrEqual(
+              node[d] * base[d],
+            );
+            expect((chunk[d] + 1) * size[d]).toBeLessThanOrEqual(
+              (node[d] + 1) * base[d],
+            );
+          }
+          const { positions, indices } = await readers[level].readMeshNode(
+            object,
+            chunk,
+            signal,
+          );
+          faces += indices.length / 3;
+          for (let t = 0; t < indices.length; t += 3) {
+            for (const [u, v] of [
+              [indices[t], indices[t + 1]],
+              [indices[t + 1], indices[t + 2]],
+              [indices[t + 2], indices[t]],
+            ]) {
+              const e = [key3(positions, u), key3(positions, v)]
+                .sort()
+                .join("|");
+              edges.set(e, (edges.get(e) ?? 0) + 1);
+            }
+          }
+        }
+      }
+      // A whole closed surface: every edge shared by exactly two faces.
+      expect(faces, `object ${object}`).toBeGreaterThan(0);
+      for (const count of edges.values()) expect(count).toBe(2);
+    }
+    // One object at each level.
+    expect([...levelsUsed].sort()).toEqual([0, 1]);
+  });
+});
+
+function key3(p: ArrayLike<number>, v: number) {
+  return [0, 1, 2].map((d) => p[3 * v + d].toFixed(3)).join(",");
+}
