@@ -262,3 +262,25 @@ describe("coalesceRangeReads", () => {
     }
   });
 });
+
+describe("cellPayloadLength", () => {
+  it("reads a cell's length from its header or shard index alone", async () => {
+    for (const store of ["poly_raw", "poly_raw_shard"]) {
+      const reader = await openReader(store, "0/vertices");
+      for (const [key, bytes] of await allCells(reader)) {
+        const cell = key.split(".").map(Number);
+        expect(await reader.cellPayloadLength(cell), `${store} ${key}`).toBe(
+          bytes.byteLength,
+        );
+      }
+    }
+  });
+
+  it("cannot without reading a compressed cell", async () => {
+    const reader = await openReader("poly_zstd", "0/vertices");
+    const [key] = (await allCells(reader)).keys();
+    expect(
+      await reader.cellPayloadLength(key.split(".").map(Number)),
+    ).toBeNull();
+  });
+});

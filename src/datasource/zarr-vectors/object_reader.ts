@@ -32,11 +32,18 @@ import {
 import type { ElementType } from "#src/datasource/zarr-vectors/dtype.js";
 import {
   decodeFloat32,
+  decodeIndices,
   ELEMENT_BYTES,
+  isElementType,
 } from "#src/datasource/zarr-vectors/dtype.js";
+import type { FragmentIndex } from "#src/datasource/zarr-vectors/fragment_index.js";
+import { decodeFragments } from "#src/datasource/zarr-vectors/fragment_index.js";
 import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js";
 import { LevelCells } from "#src/datasource/zarr-vectors/level_cells.js";
-import { CrossChunkLinks } from "#src/datasource/zarr-vectors/links.js";
+import {
+  CrossChunkLinks,
+  intraLinksPath,
+} from "#src/datasource/zarr-vectors/links.js";
 import type { ManifestBlock } from "#src/datasource/zarr-vectors/object_manifest.js";
 import {
   decodeObjectManifest,
@@ -68,6 +75,17 @@ export interface ObjectSkeleton {
 interface ObjectParts {
   order: { chunkKey: string; vertices: number[] }[];
   chunks: Map<string, DecodedChunk>;
+}
+
+/** Faces sampled to measure a level's edge length. */
+const SAMPLE_FACES = 5000;
+
+/** One object's part of a chunk: its faces there and its vertices. */
+interface LocalPart {
+  /** Chunk-local vertex triples. */
+  faces: Uint32Array;
+  isMember(vertex: number): boolean;
+  position(vertex: number): Float32Array | undefined;
 }
 
 function decodedBytes(chunk: DecodedChunk | undefined) {
@@ -102,6 +120,10 @@ export class ObjectReader {
     (b) => b?.byteLength ?? 0,
   );
   private manifestChunks = new AsyncLru<Uint8Array[]>(16);
+  private fragmentIndexes = new AsyncLru<FragmentIndex | undefined>(1024);
+  private groupedFaces_:
+    | Promise<{ path: string; type: ElementType } | undefined>
+    | undefined;
 
   constructor(
     private access: ZarrVectorsStoreAccess,
@@ -306,88 +328,307 @@ export class ObjectReader {
     );
   }
 
-  /** Positions of a neighbour's vertices, decoded or straight from its cell. */
-  private async positionsOf(chunkKey: string) {
-    const cached = this.chunks.peek(chunkKey);
-    const decoded = cached && (await cached.catch(() => undefined));
-    if (decoded !== undefined) return decoded.positions;
-    const bytes = await this.vertexCell(chunkKey);
-    if (bytes === undefined) return undefined;
-    const type = this.vertexType;
-    return decodeFloat32(bytes, type, bytes.byteLength / ELEMENT_BYTES[type]);
-  }
-
   private get vertexType(): ElementType {
     return this.level.arrays.vertices.attributes?.dtype ?? "float32";
+  }
+
+  /**
+   * The level's intra-chunk face array, when it declares one face group per
+   * vertex fragment (`"link_groups": "per_vertex_fragment"`, as
+   * `zvtools pyramid` writes and `zvtools index-faces` adds).
+   */
+  private groupedFaces() {
+    this.groupedFaces_ ??= (async () => {
+      const { description } = this;
+      if (
+        KIND_CAPABILITIES[description.geometryKind].primitive !== "triangles"
+      ) {
+        return undefined;
+      }
+      const path = intraLinksPath(description.linkWidth);
+      const attributes = (await this.cells.reader(path))?.array.attributes;
+      const type = attributes?.dtype ?? "int64";
+      return attributes?.link_groups === "per_vertex_fragment" &&
+        isElementType(type)
+        ? { path, type }
+        : undefined;
+    })().catch(() => undefined);
+    return this.groupedFaces_;
+  }
+
+  /** A chunk's vertex fragments or face groups, decoded. */
+  private fragmentIndex(path: string, chunkKey: string) {
+    return this.fragmentIndexes.get(`${path}|${chunkKey}`, async () => {
+      const bytes = await this.cells.readCell(path, chunkKey, SHARED_SIGNAL);
+      return bytes === undefined ? undefined : decodeFragments(bytes);
+    });
+  }
+
+  private inconsistent(why: string) {
+    warnOnce(
+      `${this.cells.levelPath}: declares one face group per vertex fragment, ` +
+        `but ${why}; those chunks are read whole`,
+    );
+  }
+
+  /**
+   * The object's part of a chunk read from its own rows only: its vertex
+   * rows and its face group, by byte range. `undefined` unless the level
+   * declares per-fragment face groups and the chunk bears that out
+   * (uncompressed, one group per fragment, each a row range whose faces
+   * index only its fragment) -- the caller then reads the whole cell.
+   */
+  private async partFromRows(
+    chunkKey: string,
+    fragmentIds: readonly number[],
+    signal: AbortSignal,
+  ): Promise<LocalPart | undefined> {
+    const faceArray = await this.groupedFaces();
+    if (faceArray === undefined) return undefined;
+    try {
+      return await this.readRowsPart(chunkKey, fragmentIds, faceArray, signal);
+    } catch (e) {
+      // An unreadable sidecar, or one pointing past its cell.
+      signal.throwIfAborted();
+      this.inconsistent(`reading a chunk's own rows failed (${e})`);
+      return undefined;
+    }
+  }
+
+  private async readRowsPart(
+    chunkKey: string,
+    fragmentIds: readonly number[],
+    faceArray: { path: string; type: ElementType },
+    signal: AbortSignal,
+  ): Promise<LocalPart | undefined> {
+    const [fragments, groups] = await Promise.all([
+      this.fragmentIndex("vertex_fragments", chunkKey),
+      this.fragmentIndex("link_fragments", chunkKey),
+    ]);
+    if (fragments === undefined || groups === undefined) return undefined;
+    if (groups.numFragments !== fragments.numFragments) {
+      this.inconsistent("a chunk's face groups do not match its fragments");
+      return undefined;
+    }
+    const vertexType = this.vertexType;
+    const vertexRow = 3 * ELEMENT_BYTES[vertexType];
+    const faceRow = 3 * ELEMENT_BYTES[faceArray.type];
+    const parts = await Promise.all(
+      fragmentIds.map(async (f) => {
+        if (
+          f >= fragments.numFragments ||
+          !fragments.isRange(f) ||
+          !groups.isRange(f)
+        ) {
+          return undefined;
+        }
+        const { start, count } = fragments.range(f);
+        const group = groups.range(f);
+        const [vertexBytes, faceBytes] = await Promise.all([
+          this.cells.readCellRange(
+            "vertices",
+            chunkKey,
+            start * vertexRow,
+            count * vertexRow,
+            signal,
+          ),
+          group.count === 0
+            ? new Uint8Array(0)
+            : this.cells.readCellRange(
+                faceArray.path,
+                chunkKey,
+                group.start * faceRow,
+                group.count * faceRow,
+                signal,
+              ),
+        ]);
+        if (vertexBytes == null || faceBytes == null) return undefined;
+        const faces = decodeIndices(faceBytes, faceArray.type, 3 * group.count);
+        for (const v of faces) {
+          if (v < start || v >= start + count) {
+            this.inconsistent(
+              "a face group indexes another fragment's vertices",
+            );
+            return undefined;
+          }
+        }
+        const positions = decodeFloat32(vertexBytes, vertexType, 3 * count);
+        return { start, count, positions, faces };
+      }),
+    );
+    if (parts.some((p) => p === undefined)) return undefined;
+    const ranges = parts as NonNullable<(typeof parts)[number]>[];
+    const rangeOf = (v: number) =>
+      ranges.find((r) => v >= r.start && v < r.start + r.count);
+    const faces = new Uint32Array(
+      ranges.reduce((n, r) => n + r.faces.length, 0),
+    );
+    let at = 0;
+    for (const r of ranges) {
+      faces.set(r.faces, at);
+      at += r.faces.length;
+    }
+    return {
+      faces,
+      isMember: (v) => rangeOf(v) !== undefined,
+      position: (v) => {
+        const r = rangeOf(v);
+        return r?.positions.subarray(3 * (v - r.start), 3 * (v - r.start) + 3);
+      },
+    };
+  }
+
+  /** The object's part of a chunk, from the whole decoded cell. */
+  private async partFromCell(
+    chunkKey: string,
+    fragmentIds: readonly number[],
+  ): Promise<LocalPart | undefined> {
+    const decoded = await this.decode(chunkKey);
+    if (decoded === undefined) return undefined;
+    const member = new Uint8Array(decoded.numVertices);
+    for (const f of fragmentIds) {
+      if (f >= decoded.fragments.numFragments) continue;
+      forEachFragmentVertex(decoded.fragments, f, (v) => (member[v] = 1));
+    }
+    const kept: number[] = [];
+    const { faces, positions } = decoded;
+    for (let i = 0; i + 3 <= faces.length; i += 3) {
+      if (member[faces[i]] && member[faces[i + 1]] && member[faces[i + 2]]) {
+        kept.push(faces[i], faces[i + 1], faces[i + 2]);
+      }
+    }
+    return {
+      faces: Uint32Array.from(kept),
+      isMember: (v) => member[v] === 1,
+      position: (v) =>
+        3 * v + 3 <= positions.length
+          ? positions.subarray(3 * v, 3 * v + 3)
+          : undefined,
+    };
+  }
+
+  /** Positions of some rows of a neighbour, decoded already or read. */
+  private async farPositions(
+    chunkKey: string,
+    rows: readonly number[],
+    signal: AbortSignal,
+  ): Promise<Map<number, Float32Array>> {
+    const cached = this.chunks.peek(chunkKey);
+    const decoded = cached && (await cached.catch(() => undefined));
+    if (decoded !== undefined) {
+      const out = new Map<number, Float32Array>();
+      for (const v of rows) {
+        if (3 * v + 3 <= decoded.positions.length) {
+          out.set(v, decoded.positions.subarray(3 * v, 3 * v + 3));
+        }
+      }
+      return out;
+    }
+    return this.cells.vertexRows(chunkKey, this.vertexType, rows, signal, () =>
+      this.vertexCell(chunkKey),
+    );
   }
 
   /**
    * An object's triangles stored in one chunk: its faces inside the chunk,
    * and the faces the chunk stores across its faces (their other corners are
    * read from the neighbours).  Every face of the object is in exactly one
-   * chunk's set.
+   * chunk's set.  Reads only the object's rows where the store allows it
+   * (`partFromRows`), else the whole cell.
    */
   async readMeshNode(
     segmentId: bigint,
     chunk: readonly number[],
     signal: AbortSignal,
   ): Promise<{ positions: Float32Array; indices: Uint32Array }> {
+    const empty = {
+      positions: new Float32Array(0),
+      indices: new Uint32Array(0),
+    };
     const chunkKey = chunk.join(".");
-    const blocks = (await this.manifest(segmentId)).filter(
-      (b) => b.chunkCoords.join(".") === chunkKey,
-    );
-    const decoded =
-      blocks.length === 0 ? undefined : await this.decode(chunkKey);
+    const fragmentIds = [
+      ...new Set(
+        (await this.manifest(segmentId))
+          .filter((b) => b.chunkCoords.join(".") === chunkKey)
+          .flatMap((b) => [...resolveFragmentRef(b.fragmentRef)]),
+      ),
+    ];
+    if (fragmentIds.length === 0) return empty;
+    const part =
+      (await this.partFromRows(chunkKey, fragmentIds, signal)) ??
+      (await this.partFromCell(chunkKey, fragmentIds));
     signal.throwIfAborted();
-    if (decoded === undefined) {
-      return { positions: new Float32Array(0), indices: new Uint32Array(0) };
-    }
-    const member = new Uint8Array(decoded.numVertices);
-    for (const block of blocks) {
-      for (const f of resolveFragmentRef(block.fragmentRef)) {
-        if (f >= decoded.fragments.numFragments) continue;
-        forEachFragmentVertex(decoded.fragments, f, (v) => (member[v] = 1));
-      }
-    }
+    if (part === undefined) return empty;
+
     const positions: number[] = [];
     const remap = new Map<string, number>();
-    const vertexOf = (key: string, source: Float32Array, v: number) => {
+    const vertexOf = (key: string, v: number, p: ArrayLike<number>) => {
       const id = `${key}:${v}`;
       let out = remap.get(id);
       if (out === undefined) {
         out = positions.length / 3;
-        positions.push(source[3 * v], source[3 * v + 1], source[3 * v + 2]);
+        positions.push(p[0], p[1], p[2]);
         remap.set(id, out);
       }
       return out;
     };
     const indices: number[] = [];
-    const { faces } = decoded;
+    const { faces } = part;
     for (let i = 0; i + 3 <= faces.length; i += 3) {
-      if (member[faces[i]] && member[faces[i + 1]] && member[faces[i + 2]]) {
-        for (let k = 0; k < 3; ++k) {
-          indices.push(vertexOf(chunkKey, decoded.positions, faces[i + k]));
-        }
+      const corners = [0, 1, 2].map((k) => part.position(faces[i + k]));
+      if (corners.some((p) => p === undefined)) continue;
+      for (let k = 0; k < 3; ++k) {
+        indices.push(vertexOf(chunkKey, faces[i + k], corners[k]!));
       }
     }
+
+    // Faces this chunk stores across its faces. One object's: its corners
+    // here say which; the others are read from the neighbours.
     const isLocal = (coords: readonly number[]) =>
       coords.every((c, d) => c === chunk[d]);
-    const crossing = (await this.links?.linksOwnedBy(chunk)) ?? [];
+    const crossing = ((await this.links?.linksOwnedBy(chunk)) ?? []).filter(
+      ({ endpoints }) => {
+        if (endpoints.length < 3) return false;
+        const local = endpoints.filter((e) => isLocal(e.chunkCoords));
+        return (
+          local.length > 0 && local.every((e) => part.isMember(e.vertexIndex))
+        );
+      },
+    );
+    const farRows = new Map<string, Set<number>>();
     for (const { endpoints } of crossing) {
-      if (endpoints.length < 3) continue;
-      // Faces belong to one object: its corners in this chunk say which.
-      const local = endpoints.filter((e) => isLocal(e.chunkCoords));
-      if (local.length === 0 || !local.every((e) => member[e.vertexIndex])) {
-        continue;
+      for (const { chunkCoords, vertexIndex } of endpoints) {
+        if (isLocal(chunkCoords)) continue;
+        const key = chunkCoords.join(".");
+        let rows = farRows.get(key);
+        if (rows === undefined) farRows.set(key, (rows = new Set()));
+        rows.add(vertexIndex);
       }
+    }
+    const far = new Map(
+      await Promise.all(
+        [...farRows].map(
+          async ([key, rows]) =>
+            [
+              key,
+              await this.farPositions(
+                key,
+                [...rows].sort((a, b) => a - b),
+                signal,
+              ),
+            ] as const,
+        ),
+      ),
+    );
+    for (const { endpoints } of crossing) {
       const ids: number[] = [];
       for (const { chunkCoords, vertexIndex } of endpoints) {
         const key = chunkCoords.join(".");
-        const source = isLocal(chunkCoords)
-          ? decoded.positions
-          : await this.positionsOf(key);
-        if (source === undefined || 3 * vertexIndex + 3 > source.length) break;
-        ids.push(vertexOf(key, source, vertexIndex));
+        const p = isLocal(chunkCoords)
+          ? part.position(vertexIndex)
+          : far.get(key)?.get(vertexIndex);
+        if (p === undefined) break;
+        ids.push(vertexOf(key, vertexIndex, p));
       }
       if (ids.length !== endpoints.length) continue;
       for (let k = 1; k + 1 < ids.length; ++k) {
@@ -402,7 +643,56 @@ export class ObjectReader {
   }
 
   /**
-   * Mean edge length of the faces in one populated chunk: the level's
+   * The first faces of a chunk's face cell and their corners: read by byte
+   * range (a few thousand faces and just their vertices) where the cell
+   * allows it, else from the whole decoded cell.
+   */
+  private async faceSample(chunkKey: string): Promise<
+    | {
+        faces: ArrayLike<number>;
+        position(vertex: number): ArrayLike<number> | undefined;
+      }
+    | undefined
+  > {
+    const path = intraLinksPath(this.description.linkWidth);
+    const type =
+      (await this.cells.reader(path))?.array.attributes?.dtype ?? "int64";
+    const length = isElementType(type)
+      ? await this.cells.cellPayloadLength(path, chunkKey, SHARED_SIGNAL)
+      : null;
+    if (length === null || !isElementType(type)) {
+      const decoded = await this.decode(chunkKey);
+      if (decoded === undefined || decoded.faces.length < 3) return undefined;
+      const { positions } = decoded;
+      return {
+        faces: decoded.faces.subarray(0, 3 * SAMPLE_FACES),
+        position: (v) => positions.subarray(3 * v, 3 * v + 3),
+      };
+    }
+    const rowBytes = 3 * ELEMENT_BYTES[type];
+    const rows = Math.min(SAMPLE_FACES, Math.floor(length / rowBytes));
+    if (rows === 0) return undefined;
+    const bytes = await this.cells.readCellRange(
+      path,
+      chunkKey,
+      0,
+      rows * rowBytes,
+      SHARED_SIGNAL,
+    );
+    if (bytes == null) return undefined;
+    const faces = decodeIndices(bytes, type, 3 * rows);
+    const found = await this.cells.vertexRows(
+      chunkKey,
+      this.vertexType,
+      [...new Set(faces)].sort((a, b) => a - b),
+      SHARED_SIGNAL,
+      () => this.vertexCell(chunkKey),
+    );
+    return { faces, position: (v) => found.get(v) };
+  }
+
+  /**
+   * Mean edge length of some faces in one populated chunk: the level's
    * resolution, for choosing between levels of detail.
    */
   async meanEdgeLength(): Promise<number | undefined> {
@@ -421,23 +711,17 @@ export class ObjectReader {
             ].join("."),
         );
     for (const key of candidates) {
-      const decoded = await this.decode(key);
-      const faces = decoded?.faces;
-      if (decoded === undefined || faces === undefined || faces.length < 3)
-        continue;
-      const p = decoded.positions;
+      const sample = await this.faceSample(key);
+      if (sample === undefined) continue;
+      const { faces, position } = sample;
       let total = 0;
       let count = 0;
-      const step = Math.max(1, Math.floor(faces.length / 3 / 10000)) * 3;
-      for (let i = 0; i + 3 <= faces.length; i += step) {
+      for (let i = 0; i + 3 <= faces.length; i += 3) {
         for (let k = 0; k < 3; ++k) {
-          const a = faces[i + k];
-          const b = faces[i + ((k + 1) % 3)];
-          total += Math.hypot(
-            p[3 * a] - p[3 * b],
-            p[3 * a + 1] - p[3 * b + 1],
-            p[3 * a + 2] - p[3 * b + 2],
-          );
+          const a = position(faces[i + k]);
+          const b = position(faces[i + ((k + 1) % 3)]);
+          if (a === undefined || b === undefined) continue;
+          total += Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
           ++count;
         }
       }

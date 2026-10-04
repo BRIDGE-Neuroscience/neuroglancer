@@ -48,7 +48,8 @@
     ],
     "has_perm": false,
     "link_width": 3,
-    "level_delta": 0
+    "level_delta": 0,
+    "link_groups": "per_vertex_fragment"
   },
   "zarr_format": 3,
   "node_type": "array",

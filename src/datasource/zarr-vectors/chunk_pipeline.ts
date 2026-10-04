@@ -73,11 +73,6 @@ export interface DenseChunkData {
   attributes: Float32Array[];
 }
 
-/** Rows this close together are read together. */
-const RANGE_GAP_VERTICES = 4096;
-/** Past this many reads into one neighbour, its whole cell is fetched. */
-const MAX_RANGE_READS = 16;
-
 /** Raw vertex cells, by pipeline and cell, shared by chunks and ghosts. */
 const vertexCells = new AsyncLru<Uint8Array | undefined>(
   Infinity,
@@ -279,68 +274,38 @@ export class LevelPipeline {
       list.push(i);
     });
     const type = this.vertexType;
-    const rowBytes = 3 * ELEMENT_BYTES[type];
     await mapConcurrent([...byChunk], 8, async ([key, indices]) => {
       const wanted = [...new Set(indices.map((i) => ghosts[i].vertex))].sort(
         (x, y) => x - y,
       );
-      const found = new Map<number, Float32Array>();
-      const takeAll = (all: Float32Array | undefined) => {
-        for (const v of wanted) {
-          if (all !== undefined && 3 * v + 3 <= all.length) {
-            found.set(v, all.subarray(3 * v, 3 * v + 3));
-          }
-        }
-      };
-      const decodeAll = (bytes: Uint8Array | undefined) =>
-        bytes === undefined
-          ? undefined
-          : decodeFloat32(bytes, type, bytes.byteLength / ELEMENT_BYTES[type]);
       // The whole cell when it is cached or in flight, or when the view will
       // draw that chunk anyway; otherwise only the rows needed, if possible.
       let whole = vertexCells.peek(`${this.id}|${key}`);
       if (whole === undefined && this.isRequested(key.split(".").map(Number))) {
         whole = this.vertexCell(key);
       }
-      let done = false;
+      const found = await this.cells.vertexRows(
+        key,
+        type,
+        whole === undefined ? wanted : [],
+        signal,
+        () => this.vertexCell(key),
+      );
       if (whole !== undefined) {
-        takeAll(decodeAll(await whole.catch(() => undefined)));
-        done = true;
-      }
-      const spans: [number, number][] = [];
-      for (const v of wanted) {
-        const last = spans[spans.length - 1];
-        if (last !== undefined && v - last[1] <= RANGE_GAP_VERTICES) {
-          last[1] = v;
-        } else {
-          spans.push([v, v]);
+        const bytes = await whole.catch(() => undefined);
+        if (bytes !== undefined) {
+          const all = decodeFloat32(
+            bytes,
+            type,
+            bytes.byteLength / ELEMENT_BYTES[type],
+          );
+          for (const v of wanted) {
+            if (3 * v + 3 <= all.length) {
+              found.set(v, all.subarray(3 * v, 3 * v + 3));
+            }
+          }
         }
       }
-      if (!done && spans.length <= MAX_RANGE_READS) {
-        const reads = await Promise.all(
-          spans.map(([first, last]) =>
-            this.cells.readCellRange(
-              "vertices",
-              key,
-              first * rowBytes,
-              (last - first + 1) * rowBytes,
-              signal,
-            ),
-          ),
-        );
-        // `null`: the cell is compressed and must be read whole.
-        done = reads.every((r) => r !== null);
-        reads.forEach((bytes, s) => {
-          if (bytes === null || bytes === undefined) return;
-          const [first, last] = spans[s];
-          const values = decodeFloat32(bytes, type, 3 * (last - first + 1));
-          for (let v = first; v <= last; ++v) {
-            const at = 3 * (v - first);
-            found.set(v, values.subarray(at, at + 3));
-          }
-        });
-      }
-      if (!done) takeAll(decodeAll(await this.vertexCell(key)));
       for (const i of indices) {
         const p = found.get(ghosts[i].vertex);
         if (p !== undefined) out.set(p, 3 * i);
