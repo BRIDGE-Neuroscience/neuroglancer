@@ -457,20 +457,23 @@ export function coalesceRangeReads(
     // Aborted only once every caller has given up.
     const controller = new AbortController();
     let live = group.length;
+    const onAbort = () => {
+      if (--live === 0) controller.abort();
+    };
     for (const r of group) {
-      r.signal?.addEventListener(
-        "abort",
-        () => {
-          if (--live === 0) controller.abort();
-        },
-        { once: true },
-      );
+      r.signal?.addEventListener("abort", onAbort, { once: true });
     }
+    // A listener left on a signal that never aborts (a shared one) would
+    // keep the bytes reachable for as long as the signal lives.
+    const detach = () => {
+      for (const r of group) r.signal?.removeEventListener("abort", onAbort);
+    };
     read(path, {
       signal: controller.signal,
       byteRange: { offset: start, length: end - start },
     }).then(
       (bytes) => {
+        detach();
         for (const r of group) {
           const from = r.offset - start;
           if (bytes === undefined) {
@@ -483,6 +486,7 @@ export function coalesceRangeReads(
         }
       },
       (e) => {
+        detach();
         for (const r of group) r.reject(e);
       },
     );
@@ -527,12 +531,22 @@ export function coalesceRangeReads(
     const { signal } = options;
     signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
-      signal?.addEventListener("abort", () => reject(signal.reason), {
-        once: true,
-      });
+      const onAbort = () => reject(signal!.reason);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const settle =
+        <T>(f: (value: T) => void) =>
+        (value: T) => {
+          signal?.removeEventListener("abort", onAbort);
+          f(value);
+        };
       let list = pending.get(path);
       if (list === undefined) pending.set(path, (list = []));
-      list.push({ ...range, signal, resolve, reject });
+      list.push({
+        ...range,
+        signal,
+        resolve: settle(resolve),
+        reject: settle(reject),
+      });
       if (!scheduled) {
         scheduled = true;
         setTimeout(flush, 0);
@@ -611,9 +625,13 @@ export class ZarrArrayReader {
       entry = entry * subGridShape[i] + (chunkIndex[i] % subGridShape[i]);
     }
     const key = this.storedKey(shardIndex);
+    // Shared by every cell of the shard, so it is not tied to the signal of
+    // whichever caller asked first: cancelling that one must not fail the
+    // rest.
     const index = await this.shardIndexes.get(key, () =>
-      this.readShardIndex(key, signal),
+      this.readShardIndex(key, undefined),
     );
+    signal?.throwIfAborted();
     if (index === undefined) return undefined;
     const offset = index[2 * entry];
     const length = index[2 * entry + 1];
@@ -706,18 +724,24 @@ export class ZarrArrayReader {
    * header alone (or the shard index): `null` when the array is not
    * range-addressable (see {@link readCellRange}), 0 when the cell is empty.
    */
+  /**
+   * Whether parts of a cell can be read by byte range: a raw array whose
+   * read chunk holds exactly one variable-length element.
+   */
+  get rangeAddressable(): boolean {
+    const { array } = this;
+    return (
+      array.elementType === "vlen" &&
+      array.raw &&
+      array.readChunkShape.every((n) => n === 1)
+    );
+  }
+
   async cellPayloadLength(
     cell: ArrayLike<number>,
     signal?: AbortSignal,
   ): Promise<number | null> {
-    const { array } = this;
-    if (
-      array.elementType !== "vlen" ||
-      !array.raw ||
-      array.readChunkShape.some((n) => n !== 1)
-    ) {
-      return null;
-    }
+    if (!this.rangeAddressable) return null;
     if (!this.mayHaveCell(cell)) return 0;
     const element = this.cellToElement(cell);
     if (element === undefined) return 0;
@@ -749,13 +773,7 @@ export class ZarrArrayReader {
     signal?: AbortSignal,
   ): Promise<Uint8Array | undefined | null> {
     const { array } = this;
-    if (
-      array.elementType !== "vlen" ||
-      !array.raw ||
-      array.readChunkShape.some((n) => n !== 1)
-    ) {
-      return null;
-    }
+    if (!this.rangeAddressable) return null;
     if (!this.mayHaveCell(cell)) return undefined;
     const element = this.cellToElement(cell);
     if (element === undefined) return undefined;

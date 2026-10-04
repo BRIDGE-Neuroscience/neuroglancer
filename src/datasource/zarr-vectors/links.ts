@@ -196,9 +196,57 @@ export interface CrossChunkLinksOptions {
   warn?: (message: string) => void;
 }
 
+/** Rough heap size of decoded link records, for the caches' byte budgets. */
+function recordsBytes(records: readonly CrossChunkLinkRecord[]) {
+  let bytes = 64;
+  for (const r of records) bytes += 48 + 40 * r.endpoints.length;
+  return bytes;
+}
+
+/**
+ * The links a chunk stores that have an endpoint in it, ordered by their
+ * lowest such endpoint (`keys`), so one object's links are found by its row
+ * range instead of by scanning every object's.
+ */
+export interface OwnedLinks {
+  records: CrossChunkLinkRecord[];
+  keys: Float64Array;
+}
+
+/** The records of `owned` whose lowest local endpoint is in `[first, end)`. */
+export function ownedLinksInRows(
+  owned: OwnedLinks,
+  first: number,
+  end: number,
+): CrossChunkLinkRecord[] {
+  const lowerBound = (x: number) => {
+    let lo = 0;
+    let hi = owned.keys.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (owned.keys[mid] < x) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  return owned.records.slice(lowerBound(first), lowerBound(end));
+}
+
 export class CrossChunkLinks {
   private discovery: Promise<Discovery | null> | undefined;
-  private cellCache = new AsyncLru<CrossChunkLinkRecord[]>(2048);
+  // Bounded by size, not count: a level can have dozens of offset arrays,
+  // so one object's nodes alone need thousands of (array, chunk) entries,
+  // most of them empty.
+  private cellCache = new AsyncLru<CrossChunkLinkRecord[]>(
+    Infinity,
+    256 * 1024 * 1024,
+    recordsBytes,
+  );
+  private ownedCache = new AsyncLru<OwnedLinks>(
+    Infinity,
+    64 * 1024 * 1024,
+    (o) => recordsBytes(o.records) + o.keys.byteLength,
+  );
   constructor(private options: CrossChunkLinksOptions) {}
 
   /**
@@ -238,7 +286,12 @@ export class CrossChunkLinks {
         );
         return { linkWidth, arrays: [] };
       }
-      // Without listing, probe the 26 neighbours (the writer's offsets).
+      // Without listing, probe the 26 neighbours (the writer's offsets for
+      // links between adjacent chunks).
+      warn?.(
+        "links are found without directory listing only between adjacent " +
+          "chunks; longer ones (such as simplified coarse lines) are missing",
+      );
       segments = neighbourOffsets().map((o) => formatOffsets([o]));
     }
     const arrays: (OffsetArray | undefined)[] = new Array(segments.length);
@@ -299,6 +352,27 @@ export class CrossChunkLinks {
       discovery.arrays.map((a) => this.cellRecords(discovery, a, chunk)),
     );
     return perArray.flat();
+  }
+
+  /** {@link linksOwnedBy}, ordered for looking up by local row. */
+  ownedByLocalVertex(chunk: readonly number[]): Promise<OwnedLinks> {
+    return this.ownedCache.get(chunk.join("."), async () => {
+      const keyed: { record: CrossChunkLinkRecord; key: number }[] = [];
+      for (const record of await this.linksOwnedBy(chunk)) {
+        let key = Infinity;
+        for (const { chunkCoords, vertexIndex } of record.endpoints) {
+          if (chunkCoords.every((c, d) => c === chunk[d])) {
+            key = Math.min(key, vertexIndex);
+          }
+        }
+        if (key !== Infinity) keyed.push({ record, key });
+      }
+      keyed.sort((a, b) => a.key - b.key);
+      return {
+        records: keyed.map((k) => k.record),
+        keys: Float64Array.from(keyed, (k) => k.key),
+      };
+    });
   }
 
   /** Links with any endpoint in `chunk`, from its cells and its neighbours'. */

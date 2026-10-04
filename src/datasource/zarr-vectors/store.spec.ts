@@ -28,6 +28,8 @@ import {
   readSegmentProperties,
 } from "#src/datasource/zarr-vectors/objects.js";
 import {
+  chunkIndexBounds,
+  kvStoreAccess,
   openZarrVectorsStore,
   safeAttributeId,
 } from "#src/datasource/zarr-vectors/store.js";
@@ -403,5 +405,77 @@ describe("skeletons", () => {
     }
     expect(got.sort()).toEqual(expectedEdges());
     positions.forEach((p, v) => expect(ids.get(key(p))).toBe(objectIds[v]));
+  });
+});
+
+describe("edge cases", () => {
+  it("falls back to row ids when an id column is shorter than the objects", async () => {
+    // An edit that added objects without extending the column.
+    const base = access("pts_sparse_ids");
+    const short = {
+      ...base,
+      read: async (path: string, options: any) => {
+        const bytes = await base.read(path, options);
+        if (
+          bytes === undefined ||
+          !path.endsWith("object_index/object_ids/zarr.json")
+        ) {
+          return bytes;
+        }
+        const json = JSON.parse(new TextDecoder().decode(bytes));
+        json.shape = [json.shape[0] - 1];
+        return new TextEncoder().encode(JSON.stringify(json));
+      },
+    };
+    const table = await readObjectTable(short, "0");
+    expect(table!.idSource).toBe("row");
+    expect(table!.segmentIds.length).toBe(expected.point_object_ids.length);
+  });
+
+  it("counts a vertex on the upper bound as inside", () => {
+    const { lowerChunkBound, upperChunkBound } = chunkIndexBounds(
+      [-16, 0, 1],
+      [32, 31.5, 1],
+      [16, 16, 16],
+    );
+    expect(Array.from(lowerChunkBound)).toEqual([-1, 0, 0]);
+    // 32 is stored in cell 2; 31.5 in cell 1; a flat axis still has a cell.
+    expect(Array.from(upperChunkBound)).toEqual([3, 2, 1]);
+  });
+
+  it("keeps only the asked-for bytes when a server ignores the range", async () => {
+    const file = Uint8Array.from({ length: 100 }, (_, i) => i);
+    for (const honours of [false, true]) {
+      const context = {
+        read: async (_url: string, options: any) => {
+          const range = options.byteRange;
+          if (!honours || range === undefined) {
+            return { response: new Response(file), offset: 0 };
+          }
+          const offset =
+            "suffixLength" in range
+              ? file.length - range.suffixLength
+              : range.offset;
+          const length =
+            "suffixLength" in range ? range.suffixLength : range.length;
+          return {
+            response: new Response(file.slice(offset, offset + length)),
+            offset,
+          };
+        },
+        list: async () => ({ directories: [] }),
+      };
+      const access = kvStoreAccess(context, "http://example/store/");
+      const [a, b, suffix] = await Promise.all([
+        access.read("cell", { byteRange: { offset: 10, length: 5 } }),
+        access.read("cell", { byteRange: { offset: 50, length: 3 } }),
+        access.read("cell", { byteRange: { suffixLength: 4 } }),
+      ]);
+      expect(Array.from(a!), `honours ${honours}`).toEqual([
+        10, 11, 12, 13, 14,
+      ]);
+      expect(Array.from(b!)).toEqual([50, 51, 52]);
+      expect(Array.from(suffix!)).toEqual([96, 97, 98, 99]);
+    }
   });
 });

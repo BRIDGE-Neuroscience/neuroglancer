@@ -157,10 +157,16 @@ export class LevelCells {
     );
   }
 
+  /** Whether the array's cells can be read in parts, by byte range. */
+  async rangeAddressable(path: string): Promise<boolean> {
+    return (await this.reader(path))?.rangeAddressable ?? false;
+  }
+
   /**
    * Positions of vertex rows `rows` (sorted, distinct) of a chunk: read by
    * byte range where the cell allows it (uncompressed, one cell per stored
-   * chunk), else decoded from `whole()`, the whole cell.
+   * chunk), else decoded from `whole()`, the whole cell. Rows the cell does
+   * not hold are left out, whichever way it is read.
    */
   async vertexRows(
     chunkKey: string,
@@ -170,37 +176,38 @@ export class LevelCells {
     whole: () => Promise<Uint8Array | undefined>,
   ): Promise<Map<number, Float32Array>> {
     const found = new Map<number, Float32Array>();
+    if (rows.length === 0) return found;
     const rowBytes = 3 * ELEMENT_BYTES[type];
-    const spans: [number, number][] = [];
-    for (const v of rows) {
-      const last = spans[spans.length - 1];
-      if (last !== undefined && v - last[1] <= ROW_GAP) last[1] = v;
-      else spans.push([v, v]);
-    }
-    const reads =
-      spans.length > MAX_ROW_READS
-        ? null
-        : await Promise.all(
-            spans.map(([first, last]) =>
-              this.readCellRange(
-                "vertices",
-                chunkKey,
-                first * rowBytes,
-                (last - first + 1) * rowBytes,
-                signal,
-              ),
+    if (await this.rangeAddressable("vertices")) {
+      const spans = rowSpans(rows, ROW_GAP, MAX_ROW_READS);
+      try {
+        const reads = await Promise.all(
+          spans.map(([first, last]) =>
+            this.readCellRange(
+              "vertices",
+              chunkKey,
+              first * rowBytes,
+              (last - first + 1) * rowBytes,
+              signal,
             ),
-          );
-    if (reads !== null && reads.every((r) => r !== null)) {
-      reads.forEach((bytes, s) => {
-        if (bytes === undefined) return;
-        const [first, last] = spans[s];
-        const values = decodeFloat32(bytes, type, 3 * (last - first + 1));
-        for (let v = first; v <= last; ++v) {
-          found.set(v, values.subarray(3 * (v - first), 3 * (v - first) + 3));
-        }
-      });
-      return found;
+          ),
+        );
+        reads.forEach((bytes, s) => {
+          if (bytes == null) return;
+          const [first, last] = spans[s];
+          const values = decodeFloat32(bytes, type, 3 * (last - first + 1));
+          for (const v of rows) {
+            if (v < first || v > last) continue;
+            found.set(v, values.subarray(3 * (v - first), 3 * (v - first) + 3));
+          }
+        });
+        return found;
+      } catch {
+        // A row past the end of the cell (a link naming a row it does not
+        // hold): the whole cell says which rows exist.
+        signal.throwIfAborted();
+        found.clear();
+      }
     }
     const bytes = await whole();
     if (bytes === undefined) return found;
@@ -220,4 +227,39 @@ export class LevelCells {
     const reader = await this.reader(path);
     return reader?.mayHaveCell(parseChunkKey(chunkKey)) ?? false;
   }
+}
+
+/**
+ * `rows` (sorted, distinct) as at most `maxSpans` inclusive `[first, last]`
+ * spans: rows within `gap` of each other share one, then the closest spans
+ * are joined until few enough remain. Joining reads rows between that no one
+ * asked for, but never more than the cell holds.
+ */
+export function rowSpans(
+  rows: readonly number[],
+  gap: number,
+  maxSpans: number,
+): [number, number][] {
+  const spans: [number, number][] = [];
+  for (const v of rows) {
+    const last = spans[spans.length - 1];
+    if (last !== undefined && v - last[1] <= gap) last[1] = v;
+    else spans.push([v, v]);
+  }
+  if (spans.length <= maxSpans) return spans;
+  // Join across the largest gaps last: keep the `maxSpans - 1` widest.
+  const gaps = spans
+    .slice(1)
+    .map((s, i) => ({ i, width: s[0] - spans[i][1] }))
+    .sort((a, b) => b.width - a.width)
+    .slice(0, maxSpans - 1)
+    .map((g) => g.i)
+    .sort((a, b) => a - b);
+  const out: [number, number][] = [];
+  let first = 0;
+  for (const i of [...gaps, spans.length - 1]) {
+    out.push([spans[first][0], spans[i][1]]);
+    first = i + 1;
+  }
+  return out;
 }

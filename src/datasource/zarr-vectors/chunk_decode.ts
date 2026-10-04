@@ -226,12 +226,19 @@ export function chunkKeyWord(chunkKey: string): number {
 }
 
 export interface DecodeChunkOptions {
-  /** Children whose parent lies in another chunk (linked skeleton layout). */
-  relinkedChildren?: ReadonlySet<number>;
+  /**
+   * Children whose parent lies in another chunk (linked skeleton layout).
+   * May still be loading: it is needed only once the cells are read.
+   */
+  relinkedChildren?: ReadonlySet<number> | Promise<ReadonlySet<number>>;
   /** Skip `fragment_attributes/segment_id` (per-object reads know the object). */
   skipSegmentIds?: boolean;
   /** Skip a mesh's faces (the dense overview draws its vertices only). */
   skipFaces?: boolean;
+  /** Skip per-vertex tangents (a caller that assembles objects makes its own). */
+  skipTangents?: boolean;
+  /** Skip vertex attributes (mesh nodes carry positions only). */
+  skipAttributes?: boolean;
   /** The `vertices` cell, when the caller has it (or its read) already. */
   vertices?: Promise<Uint8Array | undefined>;
 }
@@ -258,9 +265,9 @@ export async function decodeChunk(
     vertices: options.vertices ?? read("vertices"),
     fragments: read("vertex_fragments"),
     links: linksPath === undefined ? undefined : read(linksPath),
-    attributes: Promise.all(
-      attributes.map((a) => read(`vertex_attributes/${a.name}`)),
-    ),
+    attributes: options.skipAttributes
+      ? Promise.resolve([])
+      : Promise.all(attributes.map((a) => read(`vertex_attributes/${a.name}`))),
     segmentIds:
       description.hasObjects && !options.skipSegmentIds
         ? read("fragment_attributes/segment_id")
@@ -313,25 +320,28 @@ export async function decodeChunk(
       linksConvention === "implicit_sequential"
         ? sequentialEdges(fragments)
         : linksConvention === "implicit_sequential_with_branches"
-          ? branchedEdges(fragments, records, options.relinkedChildren)
+          ? branchedEdges(fragments, records, await options.relinkedChildren)
           : records;
   }
-  const tangents =
-    tangent === "walk"
+  const tangents = options.skipTangents
+    ? undefined
+    : tangent === "walk"
       ? walkTangents(positions, fragments)
       : tangent === "edges"
         ? edgeTangents(positions, edges)
         : undefined;
 
   const attributeBytes = await reads.attributes;
-  const decodedAttributes = attributes.map((a, i) => {
-    const bytes = attributeBytes[i];
-    const count = numVertices * a.components;
-    // Coarse levels may lack an attribute the finest level has.
-    return bytes === undefined
-      ? new Float32Array(count)
-      : decodeFloat32(bytes, a.dtype as ElementType, count);
-  });
+  const decodedAttributes = (options.skipAttributes ? [] : attributes).map(
+    (a, i) => {
+      const bytes = attributeBytes[i];
+      const count = numVertices * a.components;
+      // Coarse levels may lack an attribute the finest level has.
+      return bytes === undefined
+        ? new Float32Array(count)
+        : decodeFloat32(bytes, a.dtype as ElementType, count);
+    },
+  );
 
   let segmentIds: Uint32Array | undefined;
   const segmentBytes = await reads.segmentIds;

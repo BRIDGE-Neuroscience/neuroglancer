@@ -126,10 +126,83 @@ export function buildMeshOctree(nodesByLod: readonly (readonly number[][])[]): {
   }
 }
 
+/** What one object's multiscale mesh manifest needs. */
+export interface ObjectMeshLayout {
+  octree: Uint32Array;
+  lodScales: Float32Array;
+  /** Base-chunk offset of this object's octree grid from the stored one. */
+  gridOffset: number[];
+  chunkGridSpatialOrigin: number[];
+  clipLowerBound: number[];
+  clipUpperBound: number[];
+}
+
 /**
- * Orders a fragment's triangles by the octant of the node they fall in (by
- * centroid), as Neuroglancer draws a coarse node's octants only where finer
- * nodes are not drawn. Level-of-detail-0 fragments have a single part.
+ * One object's octree and level-of-detail scales, from the stored chunks it
+ * has geometry in at each level of detail (finest first).
+ *
+ * - An object a coarser level dropped stops at the last level that has it:
+ *   an empty level of detail would be drawn as nothing when zoomed out.
+ *   Levels above are empty parents with scale 0, which Neuroglancer passes
+ *   through.
+ * - Grid coordinates must be non-negative and each level's chunks must nest
+ *   in its parents': `gridOffset` (from the store's bounds) is raised, in
+ *   steps that keep every level aligned, until this object's chunks fit.
+ */
+export function objectMeshLayout(
+  chunksPerLevel: readonly (readonly number[][])[],
+  baseChunkShape: readonly number[],
+  gridOffset: readonly number[],
+  scales: Float32Array,
+): ObjectMeshLayout {
+  const missing = chunksPerLevel.findIndex((c) => c.length === 0);
+  const used = missing > 0 ? chunksPerLevel.slice(0, missing) : chunksPerLevel;
+  const step = 2 ** (chunksPerLevel.length - 1);
+  const offset = gridOffset.map((o, d) => {
+    let need = o;
+    used.forEach((coords, lod) => {
+      for (const c of coords) need = Math.max(need, -c[d] * 2 ** lod);
+    });
+    return Math.ceil(need / step) * step;
+  });
+  const origin = baseChunkShape.map((c, d) => -offset[d] * c);
+  const nodes = used.map((coords, lod) =>
+    coords.map((c) => c.map((x, d) => x + offset[d] / 2 ** lod)),
+  );
+  const { octree, numLods } = buildMeshOctree(nodes);
+  const lodScales = new Float32Array(numLods);
+  lodScales.set(scales.subarray(0, Math.min(numLods, used.length)));
+  const lower = [Infinity, Infinity, Infinity];
+  const upper = [-Infinity, -Infinity, -Infinity];
+  nodes.forEach((coords, lod) => {
+    for (const c of coords) {
+      for (let d = 0; d < 3; ++d) {
+        const size = 2 ** lod * baseChunkShape[d];
+        lower[d] = Math.min(lower[d], c[d] * size + origin[d]);
+        upper[d] = Math.max(upper[d], (c[d] + 1) * size + origin[d]);
+      }
+    }
+  });
+  if (!Number.isFinite(lower[0])) (lower.fill(0), upper.fill(0));
+  return {
+    octree,
+    lodScales,
+    gridOffset: offset,
+    chunkGridSpatialOrigin: origin,
+    clipLowerBound: lower,
+    clipUpperBound: upper,
+  };
+}
+
+/**
+ * Orders a fragment's triangles by the octant of the node they fall in, as
+ * Neuroglancer draws a coarse node's octants only where finer nodes are not
+ * drawn. A triangle that crosses a mid-plane is clipped into one piece per
+ * octant it covers -- the precomputed format does the same when it is
+ * written -- so drawing some octants coarse and others fine leaves no strip
+ * of the coarse surface out and draws none of it twice. Clipped corners are
+ * shared between the pieces either side of a plane, so normals stay smooth.
+ * Level-of-detail-0 fragments have a single part.
  */
 export function partitionMeshFragment(
   positions: Float32Array,
@@ -149,29 +222,123 @@ export function partitionMeshFragment(
       subChunkOffsets: Uint32Array.of(0, indices.length),
     };
   }
+  const mid = [0, 1, 2].map((d) => nodeLower[d] + nodeSize[d] / 2);
+  const numVertices = positions.length / 3;
+  const added: number[] = [];
+  const coord = (v: number, d: number) =>
+    v < numVertices ? positions[3 * v + d] : added[3 * (v - numVertices) + d];
+  const side = (v: number, d: number) => (coord(v, d) >= mid[d] ? 1 : 0);
+  // Where edge (u, v) meets plane `d`: one vertex per edge and plane, so the
+  // triangles either side of an edge share it.
+  const cuts = new Map<string, number>();
+  const cut = (u: number, v: number, d: number) => {
+    const a = Math.min(u, v);
+    const b = Math.max(u, v);
+    const key = `${a},${b},${d}`;
+    let out = cuts.get(key);
+    if (out === undefined) {
+      const t = (mid[d] - coord(a, d)) / (coord(b, d) - coord(a, d));
+      out = numVertices + added.length / 3;
+      for (let k = 0; k < 3; ++k) {
+        const pa = coord(a, k);
+        added.push(k === d ? mid[d] : pa + t * (coord(b, k) - pa));
+      }
+      cuts.set(key, out);
+    }
+    return out;
+  };
+  // The part of a convex polygon on one side of plane `d` (Sutherland-
+  // Hodgman). A corner exactly on the plane is on side 1 and is its own cut.
+  const clip = (polygon: number[], d: number, keep: number) => {
+    const out: number[] = [];
+    for (let i = 0; i < polygon.length; ++i) {
+      const u = polygon[i];
+      const v = polygon[(i + 1) % polygon.length];
+      const su = side(u, d);
+      if (su === keep) out.push(u);
+      if (su !== side(v, d)) {
+        out.push(
+          coord(u, d) === mid[d]
+            ? u
+            : coord(v, d) === mid[d]
+              ? v
+              : cut(u, v, d),
+        );
+      }
+    }
+    const deduped = out.filter((v, i) => v !== out[(i + 1) % out.length]);
+    return deduped;
+  };
+
   const numTriangles = indices.length / 3;
-  const octantOf = new Uint8Array(numTriangles);
+  const octantOf = new Int8Array(numTriangles);
   const counts = new Uint32Array(8);
+  const pieces: number[] = [];
+  const pieceOctants: number[] = [];
   for (let t = 0; t < numTriangles; ++t) {
-    const bits = [0, 1, 2].map((d) => {
-      let sum = 0;
-      for (let k = 0; k < 3; ++k) sum += positions[3 * indices[3 * t + k] + d];
-      return sum / 3 >= nodeLower[d] + nodeSize[d] / 2 ? 1 : 0;
-    });
-    const octant = getOctreeChildIndex(bits[0], bits[1], bits[2]);
-    octantOf[t] = octant;
-    ++counts[octant];
+    const a = indices[3 * t];
+    const b = indices[3 * t + 1];
+    const c = indices[3 * t + 2];
+    let crosses = false;
+    const bits = [0, 0, 0];
+    for (let d = 0; d < 3; ++d) {
+      bits[d] = side(a, d);
+      if (side(b, d) !== bits[d] || side(c, d) !== bits[d]) crosses = true;
+    }
+    if (!crosses) {
+      const octant = getOctreeChildIndex(bits[0], bits[1], bits[2]);
+      octantOf[t] = octant;
+      ++counts[octant];
+      continue;
+    }
+    octantOf[t] = -1;
+    let parts: { polygon: number[]; bits: number[] }[] = [
+      { polygon: [a, b, c], bits: [0, 0, 0] },
+    ];
+    for (let d = 0; d < 3; ++d) {
+      const next: typeof parts = [];
+      for (const { polygon, bits } of parts) {
+        for (const keep of [0, 1]) {
+          const piece = clip(polygon, d, keep);
+          if (piece.length < 3) continue;
+          const pieceBits = bits.slice();
+          pieceBits[d] = keep;
+          next.push({ polygon: piece, bits: pieceBits });
+        }
+      }
+      parts = next;
+    }
+    for (const { polygon, bits } of parts) {
+      const octant = getOctreeChildIndex(bits[0], bits[1], bits[2]);
+      for (let k = 1; k + 1 < polygon.length; ++k) {
+        pieces.push(polygon[0], polygon[k], polygon[k + 1]);
+        pieceOctants.push(octant);
+        ++counts[octant];
+      }
+    }
   }
   const subChunkOffsets = new Uint32Array(9);
   for (let o = 0; o < 8; ++o) {
     subChunkOffsets[o + 1] = subChunkOffsets[o] + 3 * counts[o];
   }
   const next = subChunkOffsets.slice(0, 8);
-  const out = new Uint32Array(indices.length);
+  const out = new Uint32Array(subChunkOffsets[8]);
   for (let t = 0; t < numTriangles; ++t) {
-    const at = next[octantOf[t]];
-    out.set(indices.subarray(3 * t, 3 * t + 3), at);
-    next[octantOf[t]] = at + 3;
+    const octant = octantOf[t];
+    if (octant < 0) continue;
+    out.set(indices.subarray(3 * t, 3 * t + 3), next[octant]);
+    next[octant] += 3;
   }
-  return { vertexPositions: positions, indices: out, subChunkOffsets };
+  for (let p = 0; p < pieceOctants.length; ++p) {
+    const octant = pieceOctants[p];
+    out.set(pieces.slice(3 * p, 3 * p + 3), next[octant]);
+    next[octant] += 3;
+  }
+  let vertexPositions = positions;
+  if (added.length > 0) {
+    vertexPositions = new Float32Array(positions.length + added.length);
+    vertexPositions.set(positions);
+    vertexPositions.set(added, positions.length);
+  }
+  return { vertexPositions, indices: out, subChunkOffsets };
 }

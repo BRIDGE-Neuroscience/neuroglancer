@@ -123,7 +123,7 @@ export function kvStoreAccess(
     read(
       url: string,
       options: any,
-    ): Promise<{ response: Response } | undefined>;
+    ): Promise<{ response: Response; offset: number } | undefined>;
     list(url: string, options: any): Promise<{ directories: string[] }>;
   },
   storeUrl: string,
@@ -132,12 +132,31 @@ export function kvStoreAccess(
   return {
     // Cells of one shard needed together are fetched together.
     read: coalesceRangeReads(async (path, options) => {
+      const { byteRange } = options;
       const response = await context.read(joinBaseUrlAndPath(storeUrl, path), {
         signal: options.signal,
-        byteRange: options.byteRange,
+        byteRange,
       });
       if (response === undefined) return undefined;
-      return new Uint8Array(await response.response.arrayBuffer());
+      const bytes = new Uint8Array(await response.response.arrayBuffer());
+      if (byteRange === undefined) return bytes;
+      // A server may ignore the range and send more, such as the whole
+      // file; keep only what was asked for, wherever it starts.
+      const start =
+        "suffixLength" in byteRange
+          ? response.offset + bytes.length - byteRange.suffixLength
+          : byteRange.offset;
+      const from = start - response.offset;
+      const length =
+        "suffixLength" in byteRange ? byteRange.suffixLength : byteRange.length;
+      if (from < 0) {
+        throw new Error(
+          `${path}: response starts at byte ${response.offset}, after ${start}`,
+        );
+      }
+      return from === 0 && bytes.length <= length
+        ? bytes
+        : bytes.slice(from, from + length);
     }),
     async listDirectories(path, signal) {
       const response = await context.list(
@@ -773,10 +792,9 @@ export function chunkIndexBounds(
       throw new Error(`chunk_shape[${i}] must be positive`);
     }
     lowerChunkBound[i] = Math.floor(lowerBounds[i] / chunkShape[i]);
-    upperChunkBound[i] = Math.max(
-      Math.ceil(upperBounds[i] / chunkShape[i]),
-      lowerChunkBound[i] + 1,
-    );
+    // The upper bound is the largest coordinate, inclusive: a vertex on it
+    // is stored in the cell that starts there.
+    upperChunkBound[i] = Math.floor(upperBounds[i] / chunkShape[i]) + 1;
   }
   return { lowerChunkBound, upperChunkBound };
 }

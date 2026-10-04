@@ -836,6 +836,7 @@ function DenseRenderLayer<
                 layer: this.backend.rpcId,
                 view: attachment.view.rpcId,
                 displayDimensionRenderInfo,
+                isSliceView: targetIsSliceView,
                 sources: serializeAllTransformedSources(transformed),
               },
             );
@@ -899,6 +900,7 @@ function DenseRenderLayer<
         transformed,
         source.densities,
         renderScaleTarget,
+        targetIsSliceView,
       );
       const localPosition = displayState.localPosition.value;
       const chunks: ZarrVectorsDenseChunk[] = [];

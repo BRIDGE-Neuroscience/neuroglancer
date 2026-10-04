@@ -167,7 +167,15 @@ async function buildDataSource(
 ): Promise<DataSource> {
   const access = kvStoreAccess(context.kvStoreContext, storeUrl);
   const store = await openZarrVectorsStore(access, selectedAttributes, signal);
-  const { description, levels, lowerBounds, upperBounds } = store;
+  const { description, lowerBounds, upperBounds } = store;
+  // A coarse level that is known to hold nothing would be drawn as the
+  // zoomed-out view and the loading stand-in, showing nothing.
+  const levels = store.levels.filter(
+    (level, i) =>
+      i === 0 ||
+      level.vertexCount !== 0 ||
+      level.arrays.vertices.attributes?.nonempty_chunks?.length !== 0,
+  );
   const warnings = [...store.warnings];
 
   const space = makeCoordinateSpace({
