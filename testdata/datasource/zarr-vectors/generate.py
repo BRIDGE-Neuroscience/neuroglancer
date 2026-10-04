@@ -240,9 +240,9 @@ def main():
              "--chunk-scale", "2,2", "--method", "mesh_decimate"],
             check=True,
         )
-        # Level 0 comes from zarr-vectors-py with one face group per chunk;
-        # regroup it per object too, so every level declares it.
-        subprocess.run([ZVTOOLS, "index-faces", path("mesh_lod")], check=True)
+        # zarr-vectors-py's write_mesh stamps level 0 fragment_link_groups
+        # and the pyramid stamps the levels it writes, so every level keeps
+        # one face group per object.
 
     expected = {
         "mesh_lod": {

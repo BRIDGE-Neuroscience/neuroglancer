@@ -85,6 +85,11 @@ export interface ZarrVectorsLevel {
   /** Physical size of one spatial cell at this level. */
   chunkShape: number[];
   vertexCount: number | undefined;
+  /**
+   * The level is stamped `fragment_link_groups`: each chunk has one intra
+   * link group per vertex fragment, in fragment order.
+   */
+  fragmentLinkGroups: boolean;
   arrays: ZarrVectorsLevelArrays;
 }
 
@@ -550,6 +555,7 @@ async function readLevel(
         ? meta.chunk_shape.map(Number)
         : rootChunkShape,
     vertexCount: Number.isFinite(vertexCount) ? vertexCount : undefined,
+    fragmentLinkGroups: meta.fragment_link_groups === true,
     arrays: {
       vertices,
       vertexFragments,

@@ -17,7 +17,8 @@
         32.0
       ],
       "preserves_object_ids": true,
-      "inherited_num_objects": 2
+      "inherited_num_objects": 2,
+      "fragment_link_groups": true
     }
   },
   "zarr_format": 3,

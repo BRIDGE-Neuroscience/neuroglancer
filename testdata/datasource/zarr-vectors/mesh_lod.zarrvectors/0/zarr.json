@@ -11,7 +11,8 @@
         "links",
         "object_index"
       ],
-      "fragments_tile": true
+      "fragments_tile": true,
+      "fragment_link_groups": true
     }
   },
   "zarr_format": 3,

@@ -264,10 +264,11 @@ describe("multi-resolution meshes from a zarr-vectors-tools pyramid", () => {
       },
     };
   }
-  const undeclared = (path: string, bytes: Uint8Array) => {
-    if (!path.endsWith("links/0/0.0.0_0.0.0/zarr.json")) return bytes;
+  /** Each level's `zarr.json`, without its `fragment_link_groups` stamp. */
+  const unstamped = (path: string, bytes: Uint8Array) => {
+    if (!/^\d+\/zarr\.json$/.test(path)) return bytes;
     const json = JSON.parse(new TextDecoder().decode(bytes));
-    delete json.attributes.link_groups;
+    delete json.attributes.zarr_vectors_level.fragment_link_groups;
     return new TextEncoder().encode(JSON.stringify(json));
   };
 
@@ -283,25 +284,25 @@ describe("multi-resolution meshes from a zarr-vectors-tools pyramid", () => {
     return out;
   }
 
-  it("declares one face group per object at every level", async () => {
-    for (const level of ["0", "1", "2"]) {
-      const json = JSON.parse(
-        new TextDecoder().decode(
-          (await fixtureRead("mesh_lod")(
-            `${level}/links/0/0.0.0_0.0.0/zarr.json`,
-            {},
-          ))!,
-        ),
-      );
-      expect(json.attributes.link_groups, `level ${level}`).toBe(
-        "per_vertex_fragment",
-      );
-    }
+  it("is stamped one face group per object at every level", async () => {
+    const store = await openZarrVectorsStore(access(), undefined);
+    expect(store.levels.map((level) => level.fragmentLinkGroups)).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    const unstampedStore = await openZarrVectorsStore(
+      edited(unstamped).access,
+      undefined,
+    );
+    expect(
+      unstampedStore.levels.map((level) => level.fragmentLinkGroups),
+    ).toEqual([false, false, false]);
   });
 
   it("gives the same surfaces whether it reads rows or whole cells", async () => {
     expect(await surfaces(edited((_, b) => b))).toEqual(
-      await surfaces(edited(undeclared)),
+      await surfaces(edited(unstamped)),
     );
   });
 
@@ -340,7 +341,7 @@ describe("multi-resolution meshes from a zarr-vectors-tools pyramid", () => {
               object,
               chunk,
             ),
-            whole: await cost(edited(undeclared), level.index, object, chunk),
+            whole: await cost(edited(unstamped), level.index, object, chunk),
           })),
         );
         const minor =
@@ -356,8 +357,8 @@ describe("multi-resolution meshes from a zarr-vectors-tools pyramid", () => {
     expect(compared).toBeGreaterThan(0);
   });
 
-  it("falls back to whole cells when the declaration does not hold", async () => {
-    const want = await surfaces(edited(undeclared));
+  it("falls back to whole cells when the stamp does not hold", async () => {
+    const want = await surfaces(edited(unstamped));
     const sidecar = /\/link_fragments\/c\//;
     // Garbage where the face groups should be.
     const garbage = edited((path, bytes) =>
