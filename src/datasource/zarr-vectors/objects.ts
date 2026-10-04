@@ -39,7 +39,7 @@ import {
   checkObjectIndexLayout,
   readJson,
 } from "#src/datasource/zarr-vectors/store.js";
-import { mapConcurrent } from "#src/datasource/zarr-vectors/util.js";
+import { mapConcurrent, warnOnce } from "#src/datasource/zarr-vectors/util.js";
 import {
   parseZarrArrayMetadata,
   ZarrArrayReader,
@@ -109,9 +109,19 @@ export async function readObjectTable(
   }
   if (!(numObjects > 0)) return undefined;
 
-  const readIds = (reader: ZarrArrayReader | undefined) =>
-    reader
-      ?.readRows(0, numObjects, signal)
+  const readIds = (reader: ZarrArrayReader | undefined) => {
+    if (reader === undefined) return undefined;
+    if (!(reader.array.shape[0] >= numObjects)) {
+      // An edit that added objects without extending the column: the next
+      // id source names them all.
+      warnOnce(
+        `${levelPath}: ${reader.array.path} has ${reader.array.shape[0]} ` +
+          `rows for ${numObjects} objects; not used`,
+      );
+      return undefined;
+    }
+    return reader
+      .readRows(0, numObjects, signal)
       .then((bytes) =>
         decodeUint64(
           bytes,
@@ -119,6 +129,7 @@ export async function readObjectTable(
           numObjects,
         ),
       );
+  };
   const [objectIds, segmentColumn] = await Promise.all([
     readIds(objectIdsReader),
     readIds(segmentIdReader),

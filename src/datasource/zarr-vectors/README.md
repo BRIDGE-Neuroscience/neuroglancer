@@ -83,7 +83,10 @@ controls apply to both, with `prop_<attribute>()`, `prop_tangent()` and
 
 One pyramid level is drawn per view: the finest whose vertices, for what the
 view would load, fit one vertex per `renderScale`² pixels (`dense_lod.ts`).
-The coarsest level stands in while it loads.
+The coarsest level stands in while it loads. A level without a vertex count
+(or with 0, which writers also use as a placeholder) is estimated from its
+neighbours; a coarse level known to be empty is not used; a flat store (one
+plane) is measured as one stored unit thick.
 
 ## What a store needs
 
@@ -94,18 +97,18 @@ feature per store (and, where it can vary, per chunk), uses it when present,
 and otherwise does what the right-hand column says. Most features change only
 cost; an object index and directory listing also change what can be shown.
 
-| Feature                                                   | Gives                                                 | Without it                                                  |
-| --------------------------------------------------------- | ----------------------------------------------------- | ----------------------------------------------------------- |
-| `object_index` (`vlen_manifests_v1`/`v2`)                 | `objects` / `meshes` / `properties` subsources        | dense overview only                                         |
-| more pyramid levels                                       | dense overview level choice (`dense_lod.ts`)          | level 0 everywhere                                          |
-| mesh levels whose chunks double and that store faces      | multi-resolution meshes (`mesh_lod.ts`)               | meshes at level 0                                           |
-| level stamped `fragment_link_groups`                      | one object's faces read alone, by byte range          | whole face cells (`zvtools index-faces` stamps it)          |
-| uncompressed cells, one per stored chunk (sharded or not) | byte-range reads of rows (bridges, faces, neighbours) | whole cells                                                 |
-| `sharding_indexed`                                        | ranges of one shard read together are merged          | one request per cell                                        |
-| server directory listing                                  | cross-chunk links found by listing `links/0/`         | edges: the 26 neighbours are probed; faces: missing, warned |
-| `nonempty_chunks`                                         | empty cells skipped without a request                 | a request that finds nothing                                |
-| zarr-vectors-tools `skeleton_layout`                      | skeleton layout known                                 | inferred                                                    |
-| `fragment_attributes/segment_id`                          | segment ids read directly                             | taken from the level's manifests                            |
+| Feature                                                   | Gives                                                                      | Without it                                                  |
+| --------------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `object_index` (`vlen_manifests_v1`/`v2`)                 | `objects` / `meshes` / `properties` subsources                             | dense overview only                                         |
+| more pyramid levels                                       | dense overview level choice (`dense_lod.ts`)                               | level 0 everywhere                                          |
+| mesh levels whose chunks double and that store faces      | multi-resolution meshes (`mesh_lod.ts`)                                    | meshes at level 0                                           |
+| level stamped `fragment_link_groups`                      | one object's faces read alone, by byte range                               | whole face cells (`zvtools index-faces` stamps it)          |
+| uncompressed cells, one per stored chunk (sharded or not) | byte-range reads of rows (bridges, faces, neighbours)                      | whole cells                                                 |
+| `sharding_indexed`                                        | ranges of one shard read together are merged                               | one request per cell                                        |
+| server directory listing                                  | cross-chunk links found by listing `links/0/`                              | edges: the 26 neighbours are probed; faces: missing, warned |
+| `nonempty_chunks`                                         | empty cells skipped without a request                                      | a request that finds nothing                                |
+| zarr-vectors-tools `skeleton_layout`                      | skeleton layout known                                                      | inferred                                                    |
+| `fragment_attributes/segment_id`                          | segment ids read directly (a dense row is mapped through the object table) | taken from the level's manifests                            |
 
 A feature is trusted only where the data bears it out: a stamped face group
 whose rows index another fragment, or whose count does not match the
@@ -121,7 +124,8 @@ Read through each array's own `zarr.json` (`zarr_array.ts`):
   array, as `zvtools attach` and `build_pyramid` produce.
 - Byte-range reads of one key issued together (the cells of a shard that
   several chunks need) are merged into one request when they lie within 8 KiB
-  of each other (`coalesceRangeReads`).
+  of each other (`coalesceRangeReads`). A server that ignores the range and
+  sends more is handled: only the asked-for bytes are kept.
 - `chunk_grid_origin` (negative chunk coordinates), `nonempty_chunks`.
 - Positions in any float or integer dtype; vertex attributes of any numeric
   dtype with 1-4 components (the width is measured when `row_shape` is
@@ -140,14 +144,29 @@ Meshes: the `meshes` subsource is a Neuroglancer multiscale mesh
 (`mesh_lod.ts`). Level 0 and each following pyramid level whose chunks are
 twice the previous level's and which stores faces is a level of detail, as
 zarr-vectors-tools builds with `zvtools pyramid --method mesh_decimate
---coarsen 2,2,2 --chunk-scale 2,2,2`; other stores use level 0 alone. An octree
-node is one chunk of a level, and its fragment is the object's faces stored in
-that chunk, including faces that reach into neighbours. Chunks hold every
-object's faces; where a level is stamped `fragment_link_groups` (one face group
-per vertex fragment, as zarr-vectors-py's `write_mesh` and `zvtools pyramid`
-write), an object's faces and vertices are read alone, by byte range, otherwise
-the whole cell is read and filtered. The dense overview draws a mesh store's
-vertices and reads no faces.
+--coarsen 2,2,2 --chunk-scale 2,2,2`; other stores use level 0 alone. An object
+a coarser level dropped stops at the last level that has it. An octree node is
+one chunk of a level, and its fragment is the object's faces stored in that
+chunk, including faces that reach into neighbours. A coarse fragment's
+triangles are clipped at the node's mid-planes into its eight octants, as the
+precomputed format is written, so where some octants are drawn coarse and
+others fine no strip of surface goes missing or is drawn twice. Chunks hold
+every object's faces; where a level is stamped `fragment_link_groups` (one face
+group per vertex fragment, as zarr-vectors-py's `write_mesh` and `zvtools
+pyramid` write), an object's faces and vertices are read alone, by byte range,
+otherwise the whole cell is read and filtered. The dense overview draws a mesh
+store's vertices and reads no faces.
+
+Caches: decoded chunks (384 MB) and raw vertex cells (128 MB) are shared by
+every reader of a store and bounded by bytes, as are cross-chunk links. The
+worker drops a store's caches, including its shard indexes, when the last
+layer using it is removed, so a store rewritten in place is read afresh once
+its layer is removed and added again; within one layer there is no live
+reload.
+
+Editing: the viewer does not edit zarr-vectors stores. Edits made elsewhere
+(zarr-vectors-py's `EditSession`) show after the layer is reloaded, at level
+0; coarser levels show what they held until the pyramid is rebuilt.
 
 Not read yet (reported once in the console):
 

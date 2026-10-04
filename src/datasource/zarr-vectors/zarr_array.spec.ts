@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { getEventListeners } from "node:events";
 import { describe, expect, it } from "vitest";
 import { fixtureRead } from "#src/datasource/zarr-vectors/test_fixtures.js";
 import {
@@ -260,6 +261,60 @@ describe("coalesceRangeReads", () => {
       expect(requests, store).toBeLessThanOrEqual(2 * shards);
       expect(requests, store).toBeLessThan(cells.length);
     }
+  });
+});
+
+describe("reads sharing a signal or a shard", () => {
+  it("drops its abort listeners once each read settles", async () => {
+    const data = new Uint8Array(1 << 16);
+    const merged = coalesceRangeReads(async (_path, options) => {
+      const { offset, length } = options.byteRange as any;
+      return data.slice(offset, offset + length);
+    });
+    // A signal that never aborts, as shared loads use: a listener left on
+    // it would keep every result reachable.
+    const signal = new AbortController().signal;
+    await Promise.all(
+      [0, 10, 20, 40_000].map((offset) =>
+        merged("a", { signal, byteRange: { offset, length: 8 } }),
+      ),
+    );
+    await merged("b", { signal, byteRange: { offset: 0, length: 8 } });
+    expect(getEventListeners(signal, "abort").length).toBe(0);
+  });
+
+  it("does not fail one cell of a shard when another's read is cancelled", async () => {
+    const read = fixtureRead("poly_raw_shard");
+    const array = (await openZarrArray(read, "0/vertices"))!;
+    const plain = new ZarrArrayReader(array, read, new ShardIndexCache());
+    const cells = [...(await allCells(plain)).keys()].map((k) =>
+      k.split(".").map(Number),
+    );
+    const shardOf = (c: number[]) =>
+      c
+        .map((x, d) =>
+          Math.floor((x - array.origin[d]) / array.readChunkShape[d] / 2),
+        )
+        .join();
+    const byShard = new Map<string, number[][]>();
+    for (const c of cells) {
+      const key = shardOf(c);
+      byShard.set(key, [...(byShard.get(key) ?? []), c]);
+    }
+    const [a, b] = [...byShard.values()].find((group) => group.length > 1)!;
+    // Like a real kvstore, a read gives up when its signal aborts.
+    const abortable = async (path: string, options: any) => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      options.signal?.throwIfAborted();
+      return read(path, options);
+    };
+    const reader = new ZarrArrayReader(array, abortable, new ShardIndexCache());
+    const cancelled = new AbortController();
+    const first = reader.readCell(a, cancelled.signal);
+    const second = reader.readCell(b, new AbortController().signal);
+    cancelled.abort();
+    await expect(first).rejects.toThrow();
+    expect(await second).toEqual(await plain.readCell(b));
   });
 });
 

@@ -46,7 +46,10 @@ import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js
 import { LevelCells } from "#src/datasource/zarr-vectors/level_cells.js";
 import { CrossChunkLinks } from "#src/datasource/zarr-vectors/links.js";
 import { decodeObjectManifest } from "#src/datasource/zarr-vectors/object_manifest.js";
-import { readObjectTable } from "#src/datasource/zarr-vectors/objects.js";
+import {
+  readObjectTable,
+  SegmentIdIndex,
+} from "#src/datasource/zarr-vectors/objects.js";
 import type {
   ZarrVectorsLevel,
   ZarrVectorsStoreAccess,
@@ -135,6 +138,9 @@ export class LevelPipeline {
   private cells: LevelCells;
   private links: CrossChunkLinks | undefined;
   private owners: Promise<Map<string, BigUint64Array> | undefined> | undefined;
+  private ids:
+    | Promise<{ index: SegmentIdIndex; segmentIds: BigUint64Array } | undefined>
+    | undefined;
   private id = nextPipelineId++;
 
   /**
@@ -167,6 +173,63 @@ export class LevelPipeline {
 
   private get vertexType(): ElementType {
     return this.level.arrays.vertices.attributes?.dtype ?? "float32";
+  }
+
+  /**
+   * The object table, when its segment ids are not simply row numbers. A
+   * stored per-fragment `segment_id` may hold either the object's segment id
+   * or its dense row (zarr-vectors-tools writes rows where a coarsener needs
+   * them), so ids are resolved against it.
+   */
+  private idTable() {
+    this.ids ??= readObjectTable(this.access, this.level.path)
+      .then((table) =>
+        table === undefined || table.idSource === "row"
+          ? undefined
+          : {
+              index: new SegmentIdIndex(table.segmentIds),
+              segmentIds: table.segmentIds,
+            },
+      )
+      .catch(() => undefined);
+    return this.ids;
+  }
+
+  /** `ids` (two uint32 per vertex), each a segment id or a dense row. */
+  private async resolveIds(ids: Uint32Array): Promise<Uint32Array> {
+    if (!this.description.hasObjects) return ids;
+    const table = await this.idTable();
+    if (table === undefined) return ids;
+    let out = ids;
+    let lastLo = -1;
+    let lastHi = -1;
+    let mappedLo = 0;
+    let mappedHi = 0;
+    for (let i = 0; i < ids.length; i += 2) {
+      const lo = ids[i];
+      const hi = ids[i + 1];
+      if (lo !== lastLo || hi !== lastHi) {
+        lastLo = lo;
+        lastHi = hi;
+        mappedLo = lo;
+        mappedHi = hi;
+        const id = (BigInt(hi) << 32n) | BigInt(lo);
+        if (
+          table.index.rowOf(id) === undefined &&
+          id < BigInt(table.segmentIds.length)
+        ) {
+          const mapped = table.segmentIds[Number(id)];
+          mappedLo = Number(mapped & 0xffffffffn);
+          mappedHi = Number(mapped >> 32n);
+        }
+      }
+      if (mappedLo !== lo || mappedHi !== hi) {
+        if (out === ids) out = ids.slice();
+        out[i] = mappedLo;
+        out[i + 1] = mappedHi;
+      }
+    }
+    return out;
   }
 
   private fragmentOwners() {
@@ -204,16 +267,19 @@ export class LevelPipeline {
           ? this.links.linksTouching(chunk)
           : this.links.linksOwnedBy(chunk);
     linksPromise.catch(() => {});
-    let relinkedChildren: Set<number> | undefined;
-    if (linked) {
-      relinkedChildren = new Set();
-      for (const { endpoints } of await linksPromise) {
-        const [child, parent] = endpoints;
-        if (isLocal(child.chunkCoords) && !isLocal(parent.chunkCoords)) {
-          relinkedChildren.add(child.vertexIndex);
-        }
-      }
-    }
+    // Worked out while the chunk's cells are read.
+    const relinkedChildren = linked
+      ? linksPromise.then((records) => {
+          const out = new Set<number>();
+          for (const { endpoints } of records) {
+            const [child, parent] = endpoints;
+            if (isLocal(child.chunkCoords) && !isLocal(parent.chunkCoords)) {
+              out.add(child.vertexIndex);
+            }
+          }
+          return out;
+        })
+      : undefined;
     const [decoded, links] = await Promise.all([
       decodeChunk(this.cells, description, chunkKey, signal, {
         relinkedChildren,
@@ -224,7 +290,8 @@ export class LevelPipeline {
     ]);
     if (decoded === undefined) return undefined;
 
-    let { segmentIds } = decoded;
+    let segmentIds =
+      decoded.segmentIds && (await this.resolveIds(decoded.segmentIds));
     if (segmentIds === undefined) {
       const ids = new Uint32Array(decoded.numVertices * 2);
       const owners = await this.fragmentOwners().catch(() => undefined);

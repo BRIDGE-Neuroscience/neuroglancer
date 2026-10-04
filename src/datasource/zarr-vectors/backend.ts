@@ -37,7 +37,7 @@ import type { DenseChunkData } from "#src/datasource/zarr-vectors/chunk_pipeline
 import { LevelPipeline } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
 import { forEachDenseChunkToLoad } from "#src/datasource/zarr-vectors/dense_lod.js";
 import {
-  buildMeshOctree,
+  objectMeshLayout,
   partitionMeshFragment,
 } from "#src/datasource/zarr-vectors/mesh_lod.js";
 import { ObjectReader } from "#src/datasource/zarr-vectors/object_reader.js";
@@ -71,6 +71,7 @@ import {
   SliceViewChunkSourceBackend,
 } from "#src/sliceview/backend.js";
 import type { TransformedSource } from "#src/sliceview/base.js";
+import type { RefCounted } from "#src/util/disposable.js";
 import { vec3 } from "#src/util/geom.js";
 import {
   getBasePriority,
@@ -79,19 +80,39 @@ import {
 import type { RPC } from "#src/worker_rpc.js";
 import { registerRPC, registerSharedObject } from "#src/worker_rpc.js";
 
-const accesses = new Map<string, ZarrVectorsStoreAccess>();
+const accesses = new Map<
+  string,
+  { access: ZarrVectorsStoreAccess; users: number }
+>();
 
-/** One access (and shard-index cache) per store, shared by its sources. */
+/**
+ * One access (and shard-index cache) per store, shared by its sources while
+ * any is alive. Dropped with the last, so a store rewritten in place is read
+ * afresh once its layers are removed and added again.
+ */
 function storeAccess(
-  context: SharedKvStoreContextCounterpart,
+  owner: RefCounted & { sharedKvStoreContext: SharedKvStoreContextCounterpart },
   storeUrl: string,
 ): ZarrVectorsStoreAccess {
-  let access = accesses.get(storeUrl);
-  if (access === undefined) {
-    access = kvStoreAccess(context.kvStoreContext, storeUrl);
-    accesses.set(storeUrl, access);
+  let entry = accesses.get(storeUrl);
+  if (entry === undefined) {
+    entry = {
+      access: kvStoreAccess(
+        owner.sharedKvStoreContext.kvStoreContext,
+        storeUrl,
+      ),
+      users: 0,
+    };
+    accesses.set(storeUrl, entry);
   }
-  return access;
+  const used = entry;
+  ++used.users;
+  owner.registerDisposer(() => {
+    if (--used.users === 0 && accesses.get(storeUrl) === used) {
+      accesses.delete(storeUrl);
+    }
+  });
+  return used.access;
 }
 
 // ------------------------------------------------------------ dense chunks
@@ -150,7 +171,7 @@ export class ZarrVectorsGeometryChunkSourceBackend extends WithParameters(
     if (this.pipeline_ === undefined) {
       const { storeUrl, description, level } = this.parameters;
       this.pipeline_ = new LevelPipeline(
-        storeAccess(this.sharedKvStoreContext, storeUrl),
+        storeAccess(this, storeUrl),
         description,
         level,
         (position) => {
@@ -187,7 +208,7 @@ export class ZarrVectorsObjectSkeletonSourceBackend extends WithParameters(
     if (this.reader_ === undefined) {
       const { storeUrl, description, level } = this.parameters;
       this.reader_ = new ObjectReader(
-        storeAccess(this.sharedKvStoreContext, storeUrl),
+        storeAccess(this, storeUrl),
         description,
         level,
       );
@@ -215,7 +236,7 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
   private get readers() {
     if (this.readers_ === undefined) {
       const { storeUrl, description, levels } = this.parameters;
-      const access = storeAccess(this.sharedKvStoreContext, storeUrl);
+      const access = storeAccess(this, storeUrl);
       this.readers_ = levels.map(
         (level) => new ObjectReader(access, description, level),
       );
@@ -227,27 +248,28 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
     return this.parameters.levels[0].chunkShape;
   }
 
-  private get gridOrigin() {
-    const { gridOffset } = this.parameters;
-    return this.baseChunk.map((c, d) => -gridOffset[d] * c);
-  }
-
   /**
    * Each level of detail's typical edge length: Neuroglancer draws the
    * coarsest level whose edges are about a pixel (times the mesh resolution
    * setting). Measured on the coarsest level, whose chunks every view loads
    * first; finer levels scale with the square root of their vertex counts.
+   * One level needs no measurement: any positive scale draws it.
    */
   private lodScales() {
     if (this.scales === undefined) {
+      let failed = false;
       const promise = (async () => {
         const { levels } = this.parameters;
         const top = levels.length - 1;
-        const measured = await this.readers[top]
-          .meanEdgeLength()
-          .catch(() => undefined);
+        if (top === 0) return Float32Array.of(1);
+        const measured = await this.readers[top].meanEdgeLength().catch(() => {
+          failed = true;
+          return undefined;
+        });
         const topEdge =
-          measured ?? (Math.min(...this.baseChunk) * 2 ** top) / 64;
+          measured !== undefined && Number.isFinite(measured) && measured > 0
+            ? measured
+            : (Math.min(...this.baseChunk) * 2 ** top) / 64;
         const topCount = levels[top].vertexCount;
         const out = levels.map(({ vertexCount }, lod) =>
           vertexCount && topCount
@@ -260,40 +282,35 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
         return Float32Array.from(out);
       })();
       this.scales = promise;
-      promise.catch(() => {
+      // Not kept when the measurement failed: the next manifest retries.
+      const forget = () => {
         if (this.scales === promise) this.scales = undefined;
-      });
+      };
+      promise.then(() => failed && forget(), forget);
     }
     return this.scales;
   }
 
   async download(chunk: MultiscaleManifestChunk, signal: AbortSignal) {
-    const { gridOffset } = this.parameters;
     const base = this.baseChunk;
-    const origin = this.gridOrigin;
-    const perLod = await Promise.all(
+    const all = await Promise.all(
       this.readers.map((r) => r.chunksOf(chunk.objectId)),
     );
     const scales = await this.lodScales();
     signal.throwIfAborted();
-    const nodes = perLod.map((coords, lod) =>
-      coords.map((c) => c.map((x, d) => x + gridOffset[d] / 2 ** lod)),
+    const layout = objectMeshLayout(
+      all,
+      base,
+      this.parameters.gridOffset,
+      scales,
     );
-    const { octree, numLods } = buildMeshOctree(nodes);
-    const lodScales = new Float32Array(numLods);
-    lodScales.set(scales.subarray(0, numLods));
-    const lower = [Infinity, Infinity, Infinity];
-    const upper = [-Infinity, -Infinity, -Infinity];
-    nodes.forEach((coords, lod) => {
-      for (const c of coords) {
-        for (let d = 0; d < 3; ++d) {
-          const size = 2 ** lod * base[d];
-          lower[d] = Math.min(lower[d], c[d] * size + origin[d]);
-          upper[d] = Math.max(upper[d], (c[d] + 1) * size + origin[d]);
-        }
-      }
-    });
-    if (!Number.isFinite(lower[0])) (lower.fill(0), upper.fill(0));
+    gridOffsets.set(chunk, layout.gridOffset);
+    const { octree, lodScales } = layout;
+    const [origin, lower, upper] = [
+      layout.chunkGridSpatialOrigin,
+      layout.clipLowerBound,
+      layout.clipUpperBound,
+    ];
     chunk.manifest = {
       chunkShape: vec3.fromValues(base[0], base[1], base[2]),
       chunkGridSpatialOrigin: vec3.fromValues(origin[0], origin[1], origin[2]),
@@ -301,7 +318,7 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
       clipUpperBound: vec3.fromValues(upper[0], upper[1], upper[2]),
       octree,
       lodScales,
-      vertexOffsets: new Float32Array(numLods * 3),
+      vertexOffsets: new Float32Array(lodScales.length * 3),
     };
   }
 
@@ -309,13 +326,13 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
     const manifestChunk = chunk.manifestChunk!;
     const { octree } = manifestChunk.manifest!;
     const { lod, chunkIndex: row } = chunk;
-    const { gridOffset } = this.parameters;
-    const origin = this.gridOrigin;
+    const offset = gridOffsets.get(manifestChunk) ?? this.parameters.gridOffset;
+    const base = this.baseChunk;
     const grid = [0, 1, 2].map((d) => octree[row * 5 + d]);
-    const size = this.baseChunk.map((c) => c * 2 ** lod);
+    const size = base.map((c) => c * 2 ** lod);
     const { positions, indices } = await this.readers[lod].readMeshNode(
       manifestChunk.objectId,
-      grid.map((x, d) => x - gridOffset[d] / 2 ** lod),
+      grid.map((x, d) => x - offset[d] / 2 ** lod),
       signal,
     );
     assignMultiscaleMeshFragmentData(
@@ -323,7 +340,7 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
       partitionMeshFragment(
         positions,
         indices,
-        grid.map((x, d) => x * size[d] + origin[d]),
+        grid.map((x, d) => (x - offset[d] / 2 ** lod) * size[d]),
         size,
         lod > 0,
       ),
@@ -332,10 +349,15 @@ export class ZarrVectorsMeshSourceBackend extends WithParameters(
   }
 }
 
+/** The grid offset each object's manifest was built with. */
+const gridOffsets = new WeakMap<MultiscaleManifestChunk, number[]>();
+
 // ------------------------------------------------------------ render layer
 
 interface DenseAttachmentState {
   displayDimensionRenderInfo: DisplayDimensionRenderInfo;
+  /** A cross-section panel, as the frontend says (it draws with the same). */
+  isSliceView: boolean;
   transformedSources: TransformedSource<
     ZarrVectorsDenseRenderLayerBackend,
     ZarrVectorsGeometryChunkSourceBackend
@@ -393,6 +415,7 @@ export class ZarrVectorsDenseRenderLayerBackend extends withChunkManager(
     attachment.state = {
       displayDimensionRenderInfo:
         view.projectionParameters.value.displayDimensionRenderInfo,
+      isSliceView: false,
       transformedSources: [],
     };
   }
@@ -417,10 +440,9 @@ export class ZarrVectorsDenseRenderLayerBackend extends withChunkManager(
       }
       const priorityTier = getPriorityTier(visibility);
       const basePriority = getBasePriority(visibility);
-      // A slice view has an orthographic, zero-depth frustum.
-      const is2d = projectionParameters.projectionMat[15] === 1;
+      const { isSliceView } = state;
       const renderScaleTarget = (
-        is2d ? this.renderScaleTarget2d : this.renderScaleTarget3d
+        isSliceView ? this.renderScaleTarget2d : this.renderScaleTarget3d
       ).value;
       forEachDenseChunkToLoad(
         projectionParameters,
@@ -428,6 +450,7 @@ export class ZarrVectorsDenseRenderLayerBackend extends withChunkManager(
         transformedSources[0],
         this.densities,
         renderScaleTarget,
+        isSliceView,
         (tsource, _levelIndex, isTarget) => {
           const chunk = (
             tsource.source as ZarrVectorsGeometryChunkSourceBackend
@@ -466,6 +489,7 @@ registerRPC(
       ZarrVectorsDenseRenderLayerBackend
     >(this, x.sources, layer);
     attachment.state!.displayDimensionRenderInfo = x.displayDimensionRenderInfo;
+    attachment.state!.isSliceView = x.isSliceView;
     layer.chunkManager.scheduleUpdateChunkPriorities();
   },
 );

@@ -55,6 +55,13 @@ function viewFrustumVolume(projectionMat: mat4) {
 }
 
 /**
+ * Smallest extent, in stored units, an axis is given when measuring volumes,
+ * so a flat store (one plane of points) still has a density and a loaded
+ * volume; both sides use it, so the plane's thickness cancels out.
+ */
+const MIN_EXTENT = 1;
+
+/**
  * Index (0 = finest) of the level to draw for this view.  `densities` are
  * vertices per unit volume of each level, finest first.
  */
@@ -63,6 +70,7 @@ export function selectDenseLevel(
   transformedSources: readonly TransformedSource<any, any>[],
   densities: readonly number[],
   renderScaleTarget: number,
+  isSliceView: boolean,
 ): number {
   const numLevels = transformedSources.length;
   if (numLevels <= 1) return 0;
@@ -74,8 +82,11 @@ export function selectDenseLevel(
   const extent: number[] = [];
   for (let i = 0; i < 3; ++i) {
     extent.push(
-      (base.upperClipDisplayBound[i] - base.lowerClipDisplayBound[i]) /
-        unitLength,
+      Math.max(
+        (base.upperClipDisplayBound[i] - base.lowerClipDisplayBound[i]) /
+          unitLength,
+        MIN_EXTENT,
+      ),
     );
   }
   const sourceVolume = extent[0] * extent[1] * extent[2];
@@ -88,7 +99,9 @@ export function selectDenseLevel(
     mat3.determinant(mat3FromMat4(tempMat3, viewMatrix)),
   );
   let loadedVolume: (level: number) => number;
-  if (projectionMat[15] === 1) {
+  // Asked of the panel, not read off the projection: an orthographic 3-d
+  // view has the same kind of projection matrix as a cross-section.
+  if (isSliceView) {
     const pixelSize =
       2 / Math.abs(projectionMat[0]) / width / Math.cbrt(viewDet) / unitLength;
     const sortedExtent = [...extent].sort((a, b) => b - a);
@@ -128,6 +141,7 @@ export function forEachDenseChunkToLoad<
   transformedSources: readonly Source[],
   densities: readonly number[],
   renderScaleTarget: number,
+  isSliceView: boolean,
   callback: (source: Source, levelIndex: number, isTarget: boolean) => void,
 ) {
   if (transformedSources.length === 0) return;
@@ -136,6 +150,7 @@ export function forEachDenseChunkToLoad<
     transformedSources,
     densities,
     renderScaleTarget,
+    isSliceView,
   );
   const visit = (levelIndex: number, isTarget: boolean) => {
     const tsource = transformedSources[levelIndex];
@@ -159,25 +174,36 @@ export function levelDensities(
 ): number[] {
   let volume = 1;
   for (let i = 0; i < lowerBounds.length; ++i) {
-    volume *= Math.max(upperBounds[i] - lowerBounds[i], 1e-9);
+    volume *= Math.max(upperBounds[i] - lowerBounds[i], MIN_EXTENT);
   }
-  const out: number[] = [];
-  for (let i = 0; i < levels.length; ++i) {
-    const { vertexCount, chunkShape } = levels[i];
-    if (vertexCount !== undefined && vertexCount > 0) {
-      out.push(vertexCount / volume);
-      continue;
-    }
-    // No count: assume density falls with the cube of the chunk growth, and
-    // halves per level when chunks do not grow.
-    const prev = out[i - 1];
-    if (prev === undefined) {
-      out.push(1e6 / volume);
-      continue;
-    }
+  // A count of 0 is a writer's placeholder as often as a fact, so it is
+  // treated as unknown. An unknown level is estimated from a known
+  // neighbour, assuming density falls with the cube of the chunk growth (or
+  // halves when chunks do not grow); with no count at all, from a guess.
+  const known = levels.map(({ vertexCount }) =>
+    vertexCount !== undefined && vertexCount > 0
+      ? vertexCount / volume
+      : undefined,
+  );
+  const ratio = (finer: number) => {
     const growth =
-      prod3(chunkShape as any) / prod3(levels[i - 1].chunkShape as any);
-    out.push(prev / (growth > 1 ? growth : 2));
+      prod3(levels[finer + 1].chunkShape as any) /
+      prod3(levels[finer].chunkShape as any);
+    return growth > 1 ? growth : 2;
+  };
+  const out = [...known];
+  const firstKnown = known.findIndex((d) => d !== undefined);
+  if (firstKnown === -1) {
+    out[0] = 1e6 / volume;
+  } else {
+    for (let i = firstKnown - 1; i >= 0; --i) out[i] = out[i + 1]! * ratio(i);
   }
-  return out;
+  for (let i = 1; i < levels.length; ++i) {
+    out[i] ??= out[i - 1]! / ratio(i - 1);
+  }
+  // Coarser levels never hold more per unit volume than finer ones.
+  for (let i = levels.length - 2; i >= 0; --i) {
+    out[i] = Math.max(out[i]!, out[i + 1]!);
+  }
+  return out as number[];
 }

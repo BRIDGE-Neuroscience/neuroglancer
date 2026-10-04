@@ -24,6 +24,7 @@ import {
   buildMeshOctree,
   meshGridOffset,
   meshLevels,
+  objectMeshLayout,
   partitionMeshFragment,
 } from "#src/datasource/zarr-vectors/mesh_lod.js";
 import { ObjectReader } from "#src/datasource/zarr-vectors/object_reader.js";
@@ -117,6 +118,64 @@ describe("buildMeshOctree", () => {
   });
 });
 
+describe("objectMeshLayout", () => {
+  const scales = Float32Array.of(1, 2, 4);
+
+  it("stops an object at the first level that dropped it", () => {
+    // Neuroglancer draws an empty level of detail as nothing and does not
+    // look below it, so the object would vanish when zoomed out.
+    for (const chunks of [
+      [
+        [
+          [0, 0, 0],
+          [1, 0, 0],
+        ],
+        [[0, 0, 0]],
+        [],
+      ],
+      [
+        [
+          [0, 0, 0],
+          [1, 0, 0],
+        ],
+        [],
+        [[0, 0, 0]],
+      ],
+    ]) {
+      const layout = objectMeshLayout(chunks, [16, 16, 16], [0, 0, 0], scales);
+      validate(layout.octree);
+      const used = chunks.findIndex((c) => c.length === 0);
+      expect(Array.from(layout.lodScales.subarray(0, used))).toEqual(
+        Array.from(scales.subarray(0, used)),
+      );
+      for (let lod = used; lod < layout.lodScales.length; ++lod) {
+        expect(layout.lodScales[lod], `lod ${lod}`).toBe(0);
+      }
+    }
+  });
+
+  it("raises the grid offset for chunks below the store's bounds", () => {
+    // Stale bounds: a chunk at x = -1 where the bounds start at 0.
+    const layout = objectMeshLayout(
+      [
+        [
+          [-1, 0, 0],
+          [0, 0, 0],
+        ],
+        [[-1, 0, 0]],
+      ],
+      [16, 16, 16],
+      [0, 0, 0],
+      scales.subarray(0, 2),
+    );
+    validate(layout.octree);
+    expect(layout.gridOffset).toEqual([2, 0, 0]);
+    expect(layout.chunkGridSpatialOrigin).toEqual([-32, -0, -0]);
+    expect(layout.clipLowerBound).toEqual([-32, 0, 0]);
+    expect(rowsOf(layout.octree).length).toBeLessThan(8);
+  });
+});
+
 describe("partitionMeshFragment", () => {
   // One triangle near each corner of the unit box.
   const positions: number[] = [];
@@ -139,6 +198,73 @@ describe("partitionMeshFragment", () => {
       const v = out.indices[3 * o];
       const corner = [0, 1, 2].map((d) => (p[3 * v + d] > 0.5 ? 1 : 0));
       expect(corner[0] | (corner[1] << 1) | (corner[2] << 2)).toBe(o);
+    }
+  });
+
+  /** Sum of the triangles' oriented area vectors (cross products / 2). */
+  function areaVector(positions: Float32Array, indices: Uint32Array) {
+    const sum = [0, 0, 0];
+    for (let t = 0; t < indices.length; t += 3) {
+      const [a, b, c] = [0, 1, 2].map((k) =>
+        Array.from(
+          positions.subarray(3 * indices[t + k], 3 * indices[t + k] + 3),
+        ),
+      );
+      const u = [0, 1, 2].map((d) => b[d] - a[d]);
+      const v = [0, 1, 2].map((d) => c[d] - a[d]);
+      sum[0] += (u[1] * v[2] - u[2] * v[1]) / 2;
+      sum[1] += (u[2] * v[0] - u[0] * v[2]) / 2;
+      sum[2] += (u[0] * v[1] - u[1] * v[0]) / 2;
+    }
+    return sum;
+  }
+
+  it("clips triangles that cross a mid-plane into their octants", () => {
+    let seed = 7;
+    const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const positions: number[] = [];
+    const indices: number[] = [];
+    for (let t = 0; t < 300; ++t) {
+      // Corners on a coarse grid so some land exactly on a mid-plane.
+      for (let k = 0; k < 3; ++k) {
+        for (let d = 0; d < 3; ++d)
+          positions.push(Math.round(random() * 8) / 8);
+      }
+      indices.push(3 * t, 3 * t + 1, 3 * t + 2);
+    }
+    const p = Float32Array.from(positions);
+    const i = Uint32Array.from(indices);
+    const out = partitionMeshFragment(p, i, [0, 0, 0], [1, 1, 1], true);
+    // Nothing gained or lost, and every face keeps its orientation.
+    const before = areaVector(p, i);
+    const after = areaVector(out.vertexPositions, out.indices);
+    for (let d = 0; d < 3; ++d) expect(after[d]).toBeCloseTo(before[d], 4);
+    let unsigned = 0;
+    for (let t = 0; t < i.length; t += 3) {
+      unsigned += Math.hypot(...areaVector(p, i.subarray(t, t + 3)));
+    }
+    let unsignedAfter = 0;
+    for (let t = 0; t < out.indices.length; t += 3) {
+      unsignedAfter += Math.hypot(
+        ...areaVector(out.vertexPositions, out.indices.subarray(t, t + 3)),
+      );
+    }
+    expect(unsignedAfter).toBeCloseTo(unsigned, 4);
+    // Every piece lies in its own octant.
+    for (let o = 0; o < 8; ++o) {
+      const bits = [o & 1, (o >> 1) & 1, (o >> 2) & 1];
+      for (
+        let at = out.subChunkOffsets[o];
+        at < out.subChunkOffsets[o + 1];
+        ++at
+      ) {
+        const v = out.indices[at];
+        for (let d = 0; d < 3; ++d) {
+          const x = out.vertexPositions[3 * v + d];
+          if (bits[d]) expect(x).toBeGreaterThanOrEqual(0.5 - 1e-6);
+          else expect(x).toBeLessThanOrEqual(0.5 + 1e-6);
+        }
+      }
     }
   });
 
