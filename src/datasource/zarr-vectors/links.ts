@@ -81,6 +81,34 @@ interface OffsetArray {
 interface Discovery {
   readonly linkWidth: number;
   readonly arrays: OffsetArray[];
+  /** `store: "duplicate"`: each link is filed in every chunk it touches. */
+  readonly duplicated?: boolean;
+}
+
+/**
+ * Whether `chunk` is the one chunk that answers for `record`: the smallest
+ * of its endpoints' chunks (coordinates compared in order). Under
+ * `store: "duplicate"` every chunk a link touches files a copy; this picks
+ * one, so the link is drawn once.
+ */
+export function ownsLink(
+  record: CrossChunkLinkRecord,
+  chunk: readonly number[],
+): boolean {
+  let owner: readonly number[] | undefined;
+  for (const { chunkCoords } of record.endpoints) {
+    if (owner === undefined) {
+      owner = chunkCoords;
+      continue;
+    }
+    for (let d = 0; d < chunkCoords.length; ++d) {
+      if (chunkCoords[d] !== owner[d]) {
+        if (chunkCoords[d] < owner[d]) owner = chunkCoords;
+        break;
+      }
+    }
+  }
+  return owner !== undefined && owner.every((c, d) => c === chunk[d]);
 }
 
 /** Inverse of zarr-vectors-py's `_lehmer_encode`. */
@@ -284,7 +312,7 @@ export class CrossChunkLinks {
           "faces spanning chunks need directory listing to be found; " +
             "they are missing from this store's meshes",
         );
-        return { linkWidth, arrays: [] };
+        return { linkWidth, arrays: [], duplicated };
       }
       // Without listing, probe the 26 neighbours (the writer's offsets for
       // links between adjacent chunks).
@@ -321,6 +349,7 @@ export class CrossChunkLinks {
     return {
       linkWidth,
       arrays: arrays.filter((a): a is OffsetArray => a !== undefined),
+      duplicated,
     };
   }
 
@@ -340,8 +369,10 @@ export class CrossChunkLinks {
   }
 
   /**
-   * Links stored in `chunk`'s cells. Each cross-chunk link is stored by
-   * exactly one of its chunks, so bridges are drawn once.
+   * Links stored in `chunk`'s cells that it answers for. Each cross-chunk
+   * link is answered for by exactly one of its chunks, so bridges and faces
+   * are drawn once: the chunk that stores it, or, where every chunk it
+   * touches stores a copy, the smallest of them.
    */
   async linksOwnedBy(
     chunk: readonly number[],
@@ -351,7 +382,10 @@ export class CrossChunkLinks {
     const perArray = await Promise.all(
       discovery.arrays.map((a) => this.cellRecords(discovery, a, chunk)),
     );
-    return perArray.flat();
+    const records = perArray.flat();
+    return discovery.duplicated
+      ? records.filter((r) => ownsLink(r, chunk))
+      : records;
   }
 
   /** {@link linksOwnedBy}, ordered for looking up by local row. */

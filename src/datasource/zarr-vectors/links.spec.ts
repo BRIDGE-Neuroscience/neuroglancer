@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import { LevelCells } from "#src/datasource/zarr-vectors/level_cells.js";
 import {
   CrossChunkLinks,
+  ownsLink,
   decodeLinkCell,
   decodeRaggedRows,
   lehmerDecode,
@@ -189,5 +190,26 @@ describe("CrossChunkLinks on a zarr-vectors-py store", () => {
       const b = (await probed.linksOwnedBy(chunk)).map(linkKey).sort();
       expect(b).toEqual(a);
     }
+  });
+});
+
+describe("ownsLink", () => {
+  const link = (...chunks: number[][]) => ({
+    endpoints: chunks.map((chunkCoords, vertexIndex) => ({
+      chunkCoords,
+      vertexIndex,
+    })),
+  });
+
+  it("gives every link one owner among the chunks it touches", () => {
+    const face = link([1, 0, 2], [0, 5, 0], [0, 4, 9]);
+    const touched = [
+      [1, 0, 2],
+      [0, 5, 0],
+      [0, 4, 9],
+    ];
+    expect(touched.filter((c) => ownsLink(face, c))).toEqual([[0, 4, 9]]);
+    expect(ownsLink(link([-1, 0, 0], [0, 0, 0]), [-1, 0, 0])).toBe(true);
+    expect(ownsLink(link([-1, 0, 0], [0, 0, 0]), [0, 0, 0])).toBe(false);
   });
 });
