@@ -1,0 +1,22 @@
+{
+  "attributes": {
+    "zarr_vectors_level": {
+      "level": 0,
+      "object_sparsity": 1.0,
+      "vertex_count": 936,
+      "coarsening_method": "none",
+      "parent_level": null,
+      "arrays_present": [
+        "fragment_attributes",
+        "links",
+        "object_attributes",
+        "object_index",
+        "vertex_fragments",
+        "vertices"
+      ],
+      "fragments_tile": true
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

@@ -54,9 +54,14 @@ export class ZarrVectorsGeometryChunkSourceParameters extends ZarrVectorsSourceP
   static RPC_ID = "zarr-vectors/GeometryChunkSource";
 }
 
-/** Whole objects at the finest level, as Neuroglancer skeletons. */
+/**
+ * Whole objects at the finest level, as Neuroglancer skeletons. `levels` is
+ * level 0's chain (`levelChain`): in an additive pyramid an object's parts
+ * are read from every level of it.
+ */
 export class ZarrVectorsObjectSkeletonSourceParameters extends ZarrVectorsSourceParameters {
   static RPC_ID = "zarr-vectors/ObjectSkeletonSource";
+  levels!: ZarrVectorsLevel[];
 }
 
 /**
@@ -70,6 +75,12 @@ export class ZarrVectorsMeshSourceParameters {
   levels!: ZarrVectorsLevel[];
   /** Base chunks added to every octree coordinate (`meshGridOffset`). */
   gridOffset!: number[];
+  /**
+   * Additive pyramid: `levels` is level 0's chain, and an object is the
+   * union of its parts at every one of them, drawn as one level of detail
+   * on the coarsest level's chunk grid.
+   */
+  union!: boolean;
 }
 
 /** A level's chunk grid, as Neuroglancer's slice-view machinery sees it. */

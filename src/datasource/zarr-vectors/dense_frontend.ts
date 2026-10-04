@@ -278,8 +278,13 @@ export class ZarrVectorsMultiscaleGeometrySource extends RefCounted {
       spec: ZarrVectorsChunkSpecification;
       parameters: ZarrVectorsGeometryChunkSourceParameters;
     }[],
-    /** Vertices per unit volume per level (finest first). */
+    /** Vertices per unit volume each level's view draws (finest first). */
     public densities: number[],
+    /**
+     * The levels each level's view draws: itself, and the coarser levels an
+     * additive level adds to (`levelChain`).
+     */
+    public chains: number[][],
   ) {
     super();
   }
@@ -733,6 +738,7 @@ export class ZarrVectorsDenseLayer extends RefCounted {
         ),
       ).rpcId,
       densities: options.source.densities,
+      chains: options.source.chains,
     });
   }
 }
@@ -904,27 +910,39 @@ function DenseRenderLayer<
       );
       const localPosition = displayState.localPosition.value;
       const chunks: ZarrVectorsDenseChunk[] = [];
+      // The target, and the coarser levels an additive target adds to: what
+      // they have loaded is drawn, coarse content as well as fine.
+      const drawn = source.chains[target] ?? [target];
+      const base = drawn[drawn.length - 1];
       const missing: Float32Array[] = [];
-      const tsource = transformed[target];
-      forEachVisibleVolumetricChunk(
-        projectionParameters,
-        localPosition,
-        tsource,
-        () => {
-          const key = tsource.curPositionInChunks.join();
-          const chunk = (
-            tsource.source as unknown as ZarrVectorsGeometryChunkSource
-          ).chunks.get(key) as ZarrVectorsDenseChunk | undefined;
-          if (chunk !== undefined && chunk.state === ChunkState.GPU_MEMORY) {
-            chunks.push(chunk);
-          } else {
-            missing.push(Float32Array.from(tsource.curPositionInChunks));
-          }
-        },
-      );
-      const ready = missing.length === 0;
-      if (!ready && target !== transformed.length - 1) {
+      let ready = true;
+      for (const level of drawn) {
+        const tsource = transformed[level];
+        forEachVisibleVolumetricChunk(
+          projectionParameters,
+          localPosition,
+          tsource,
+          () => {
+            const key = tsource.curPositionInChunks.join();
+            const chunk = (
+              tsource.source as unknown as ZarrVectorsGeometryChunkSource
+            ).chunks.get(key) as ZarrVectorsDenseChunk | undefined;
+            if (chunk !== undefined && chunk.state === ChunkState.GPU_MEMORY) {
+              chunks.push(chunk);
+            } else {
+              ready = false;
+              // The last level of the chain is complete on its own; a
+              // missing chunk of it leaves a hole the coarsest level fills.
+              if (level === base) {
+                missing.push(Float32Array.from(tsource.curPositionInChunks));
+              }
+            }
+          },
+        );
+      }
+      if (missing.length > 0 && base !== transformed.length - 1) {
         // Stand in with the coarsest level's chunk covering each missing one.
+        const tsource = transformed[base];
         const coarse = transformed[transformed.length - 1];
         const targetSize = tsource.source.spec.chunkDataSize;
         const coarseSource = coarse.source;
