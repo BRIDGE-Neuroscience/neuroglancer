@@ -121,9 +121,6 @@ export class ObjectReader {
   );
   private manifestChunks = new AsyncLru<Uint8Array[]>(16);
   private fragmentIndexes = new AsyncLru<FragmentIndex | undefined>(1024);
-  private groupedFaces_:
-    | Promise<{ path: string; type: ElementType } | undefined>
-    | undefined;
 
   constructor(
     private access: ZarrVectorsStoreAccess,
@@ -333,27 +330,25 @@ export class ObjectReader {
   }
 
   /**
-   * The level's intra-chunk face array, when it declares one face group per
-   * vertex fragment (`"link_groups": "per_vertex_fragment"`, as
-   * `zvtools pyramid` writes and `zvtools index-faces` adds).
+   * The level's intra-chunk face array, when the level is stamped
+   * `fragment_link_groups`: one face group per vertex fragment, in fragment
+   * order, as zarr-vectors-py's mesh writers and `zvtools index-faces` leave
+   * it.
    */
-  private groupedFaces() {
-    this.groupedFaces_ ??= (async () => {
-      const { description } = this;
-      if (
-        KIND_CAPABILITIES[description.geometryKind].primitive !== "triangles"
-      ) {
-        return undefined;
-      }
-      const path = intraLinksPath(description.linkWidth);
-      const attributes = (await this.cells.reader(path))?.array.attributes;
-      const type = attributes?.dtype ?? "int64";
-      return attributes?.link_groups === "per_vertex_fragment" &&
-        isElementType(type)
-        ? { path, type }
-        : undefined;
-    })().catch(() => undefined);
-    return this.groupedFaces_;
+  private get groupedFaces() {
+    const { level, description } = this;
+    const array = level.arrays.intraLinks;
+    if (
+      !level.fragmentLinkGroups ||
+      array === undefined ||
+      KIND_CAPABILITIES[description.geometryKind].primitive !== "triangles"
+    ) {
+      return undefined;
+    }
+    const type = array.attributes?.dtype ?? "int64";
+    return isElementType(type)
+      ? { path: intraLinksPath(description.linkWidth), type }
+      : undefined;
   }
 
   /** A chunk's vertex fragments or face groups, decoded. */
@@ -366,7 +361,7 @@ export class ObjectReader {
 
   private inconsistent(why: string) {
     warnOnce(
-      `${this.cells.levelPath}: declares one face group per vertex fragment, ` +
+      `${this.cells.levelPath}: is stamped fragment_link_groups, ` +
         `but ${why}; those chunks are read whole`,
     );
   }
@@ -374,7 +369,7 @@ export class ObjectReader {
   /**
    * The object's part of a chunk read from its own rows only: its vertex
    * rows and its face group, by byte range. `undefined` unless the level
-   * declares per-fragment face groups and the chunk bears that out
+   * is stamped `fragment_link_groups` and the chunk bears that out
    * (uncompressed, one group per fragment, each a row range whose faces
    * index only its fragment) -- the caller then reads the whole cell.
    */
@@ -383,7 +378,7 @@ export class ObjectReader {
     fragmentIds: readonly number[],
     signal: AbortSignal,
   ): Promise<LocalPart | undefined> {
-    const faceArray = await this.groupedFaces();
+    const faceArray = this.groupedFaces;
     if (faceArray === undefined) return undefined;
     try {
       return await this.readRowsPart(chunkKey, fragmentIds, faceArray, signal);

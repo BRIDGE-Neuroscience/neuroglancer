@@ -1,8 +1,10 @@
 {
   "attributes": {
     "zarr_vectors": {
-      "zv_version": "0.9.2",
-      "format_capabilities": [],
+      "zv_version": "0.9.3",
+      "format_capabilities": [
+        "fragment_link_groups"
+      ],
       "chunk_shape": [
         16.0,
         16.0,
