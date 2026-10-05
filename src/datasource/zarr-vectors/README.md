@@ -71,7 +71,7 @@ UI code out of the worker.
 | `""`         | Dense overview of every object, from spatial chunks (`dense_frontend.ts`)                  |
 | `objects`    | Selected objects at full resolution, as Neuroglancer skeletons (curves, skeletons, graphs) |
 | `meshes`     | Selected objects as Neuroglancer meshes (mesh stores)                                      |
-| `properties` | Object attributes as numeric segment properties; groups as tags and a label                |
+| `properties` | Object attributes as segment properties; groups and categories as tags (below)             |
 
 The dense layer follows the layer's ordinary segment state: selected segments,
 segment colours, colour seed, `selectedAlpha` (2-d) / `objectAlpha` (3-d),
@@ -198,6 +198,48 @@ Not read yet (reported once in the console):
 - Attribute-chunked levels (`chunk_attribute_values`): the level is skipped.
 - Link attributes (per-edge or per-face values).
 - Rank other than 3.
+
+## Segment properties
+
+`properties` is built from level 0's `object_attributes/` (found by listing
+the directory) and its `groups` (`objects.ts`):
+
+- Numbers keep a Neuroglancer type that holds them exactly: 8-32-bit
+  integers as themselves, float16/32/64 as float32, 64-bit integers that fit
+  32 bits as int32/uint32. Larger 64-bit values (EM root ids) become exact
+  decimal text: Neuroglancer has no 64-bit properties, and float32 would
+  merge distinct ids.
+- A value is missing when its whole row equals the array's `fill_value` and
+  the writer declared that value the absent sentinel
+  (`fill_sentinel_meaning: "absent"`, as zarr-vectors-py writes), or a legacy
+  `present_mask` sidecar clears the row. That is per column: a missing value
+  is NaN (left out of filters and the selection panel) or empty text, and the
+  object keeps its other properties. An integer column with missing values
+  is float32 when its values fit ±2^24, else text.
+- Text columns (`string`, `fixed_length_utf32`) are text properties; vector
+  columns are one property per channel, `name_<channel>` (`channel_names`
+  when declared).
+- A dictionary-encoded column (`encoding: "dictionary"`, `categories`,
+  `_FillValue`) is a text property of the category, and each category is a
+  tag `name=category`.
+- Each group is a tag, named by `group_names` on `groups`, else
+  `group_attributes/name` (or `groupings_attributes/name`), else `group_<id>`;
+  its description gives the group id, member count (`n_objects` when stored)
+  and `source_column`. A group and a category of the same name are one tag
+  holding both's objects. A range group stops at the level's last object.
+  Only tags that hold an object are coded; with more than 65,535 there are no
+  tags (a warning). There is no `label` property: Neuroglancer already shows
+  a segment's tags as its label.
+- Property ids can be filtered in the Seg tab (`[a-zA-Z][a-zA-Z0-9_]*`), are
+  unique ignoring case, and are never `id`, `label` or `group` (the tags); a
+  changed name keeps the original as its description. Tag names are unique
+  ignoring case too, and a name stored exactly wins over a changed one.
+- Bounds are of the finite values. Segment ids are listed in ascending order,
+  each once (duplicates are warned about).
+- Additive pyramids: level 0 holds every object's attributes, but
+  `vertex_count` counts each level's own vertices, so it is summed over level
+  0's chain.
+- A column that cannot be read is skipped with a warning.
 
 ## Tests
 

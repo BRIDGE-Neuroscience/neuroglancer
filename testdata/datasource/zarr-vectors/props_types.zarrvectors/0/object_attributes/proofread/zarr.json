@@ -1,0 +1,52 @@
+{
+  "shape": [
+    6
+  ],
+  "data_type": "int8",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        4
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": -1,
+  "codecs": [
+    {
+      "name": "bytes"
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 0,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "zv_array": "object_attribute",
+    "name": "proofread",
+    "dtype": "int8",
+    "shape": [
+      6
+    ],
+    "fill_sentinel_meaning": "absent",
+    "encoding": "dictionary",
+    "categories": [
+      false,
+      true
+    ],
+    "ordered": false,
+    "_FillValue": -1
+  },
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

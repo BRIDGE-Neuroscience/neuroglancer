@@ -319,13 +319,21 @@ async function buildDataSource(
             },
           },
     );
+    // One unreadable column is a warning, never a store that fails to open.
     const properties = await readSegmentProperties(
       access,
       levels[0].path,
       table,
       warnings,
       signal,
-    );
+      params.levels.map((level) => level.path),
+    ).catch((e) => {
+      signal?.throwIfAborted();
+      warnings.push(
+        `segment properties unreadable: ${e instanceof Error ? e.message : e}`,
+      );
+      return undefined;
+    });
     if (properties !== undefined) {
       subsources.push({
         id: "properties",
