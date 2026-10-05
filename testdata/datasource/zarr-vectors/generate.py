@@ -73,6 +73,83 @@ def fresh(name):
     return p
 
 
+def props_fixture():
+    """`props_types`: object attributes of every kind a writer produces.
+
+    Six polylines whose columns cover each way a segment property can go
+    wrong: missing rows (in-band sentinels, including whole chunks never
+    written), 64-bit ids, dictionary codes, strings, Inf, a vector column,
+    and names that collide.  Groups are named in `group_attributes/name`,
+    one of them as a category of `cell_type` is, and one is a range.
+    Its expected values live in `objects.spec.ts`.
+    """
+    import zarr  # noqa: PLC0415
+
+    saved = zv_arrays.OBJECT_ATTRIBUTE_ROW_BUCKET
+    # Rows 4-5 are a chunk of their own: all-missing, so never written.
+    zv_arrays.OBJECT_ATTRIBUTE_ROW_BUCKET = 4
+    try:
+        rng = np.random.default_rng(1)
+        polys = [
+            (np.cumsum(rng.normal(size=(5, 3)), axis=0) + 24).astype("float32")
+            for _ in range(6)
+        ]
+        p = fresh("props_types")
+        write_polylines(p, polys, chunk_shape=(16.0, 16.0, 16.0))
+        from zarr_vectors.core.store import open_store  # noqa: PLC0415
+
+        level = open_store(p, mode="r+")["0"]
+        present = np.array([1, 1, 0, 1, 1, 1], dtype="uint8")
+        tail_absent = np.array([1, 1, 1, 1, 0, 0], dtype="uint8")
+        columns = [
+            ("cell_type", np.array([0, 1, -1, 2, 0, 1], "int16"), None, -1,
+             {"encoding": "dictionary", "categories": ["L2IT", "PV", "L5ET"],
+              "ordered": False, "_FillValue": -1}),
+            ("proofread", np.array([1, 0, 1, 1, -1, 0], "int8"), None, -1,
+             {"encoding": "dictionary", "categories": [False, True],
+              "ordered": False, "_FillValue": -1}),
+            ("root_id", np.array([864691134884807418, 864691134886037498, 0,
+                                  864691135102580256, 864691137200012353,
+                                  864691134886499066], "int64"), present, None, None),
+            ("big_u64", np.array([2**53 + 1, 2**63 + 5, 7, 0, 1, 1], "uint64"),
+             tail_absent, None, None),
+            ("count", np.array([5, 0, 9, -3, 100, 7], "int32"), present, None, None),
+            ("wide", np.array([2**24 + 1, 1, 2, 3, 4, 5], "int32"), present, None, None),
+            ("small_i64", np.array([-5, 0, 2**31 - 1, 3, 4, 5], "int64"), None, None, None),
+            ("half", np.array([1.5, -2.25, 65504, 0.1, 1, 1], "float16"),
+             tail_absent, None, None),
+            ("with_inf", np.array([1, np.inf, 3, 2, 1, 2], "float32"), None, None, None),
+            ("vec", np.arange(30, dtype="float32").reshape(6, 5), None, None, None),
+            ("Length", np.full(6, 1, "float32"), None, None, None),
+            ("length", np.full(6, 2, "float32"), None, None, None),
+            ("label", np.arange(6, dtype="float32"), None, None, None),
+            ("bad-name", np.arange(6, dtype="uint8"), None, None, None),
+            ("name", np.array(["alpha", "beta", "", "gamma", "δέλτα", "x"]), None, None, None),
+        ]
+        for name, data, mask, fill, extra in columns:
+            zv_arrays.write_object_attributes(
+                level, name, data, present_mask=mask, fill_value=fill,
+            )
+            if extra:
+                level.write_array_meta(f"object_attributes/{name}", extra)
+        notes = zarr.open_group(os.path.join(p, "0", "object_attributes"), mode="a")
+        notes.create_array("note", shape=(6,), dtype=str, chunks=(6,), fill_value="")[:] = (
+            np.array(["n0", "", "n2", "n3", "n4", "n5"], dtype=object)
+        )
+        zv_arrays.write_groupings(level, {0: [0, 1], 1: [2], 2: range(3, 1000), 3: []})
+        zv_arrays.write_groupings_attributes(
+            level, "name", np.array(["cell_type=L2IT", "AC", "ac", "empty"]),
+        )
+        zv_arrays.write_groupings_attributes(
+            level, "n_objects", np.array([2, 1, 997, 0], "int64"),
+        )
+        zv_arrays.write_groupings_attributes(
+            level, "source_column", np.array(["cell_type", "bundle", "bundle", ""]),
+        )
+    finally:
+        zv_arrays.OBJECT_ATTRIBUTE_ROW_BUCKET = saved
+
+
 def main():
     # Small row buckets keep the fixtures small; the reader must not assume
     # the writer's 65,536 / 16,384 defaults anyway.
@@ -356,6 +433,8 @@ def main():
         },
     )
     build_pyramid(path("attrs_coarse"), factors=[(2, 2)])
+
+    props_fixture()
 
     expected = {
         "mesh_lod": {
