@@ -1,0 +1,115 @@
+{
+  "attributes": {
+    "zarr_vectors": {
+      "zv_version": "0.9.3",
+      "format_capabilities": [],
+      "chunk_shape": [
+        32.0,
+        32.0,
+        32.0
+      ],
+      "bounds": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          64,
+          64,
+          64
+        ]
+      ],
+      "geometry_types": [
+        "streamline"
+      ],
+      "links_convention": "implicit_sequential",
+      "object_index_convention": "standard",
+      "cross_chunk_strategy": "explicit_links"
+    },
+    "multiscales": [
+      {
+        "version": "0.4",
+        "name": "default",
+        "axes": [
+          {
+            "name": "x",
+            "type": "space"
+          },
+          {
+            "name": "y",
+            "type": "space"
+          },
+          {
+            "name": "z",
+            "type": "space"
+          }
+        ],
+        "datasets": [
+          {
+            "path": "0",
+            "coordinateTransformations": [
+              {
+                "type": "scale",
+                "scale": [
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "type": "translation",
+                "translation": [
+                  16.0,
+                  16.0,
+                  16.0
+                ]
+              }
+            ]
+          }
+        ],
+        "metadata": {
+          "format": "zarr_vectors"
+        }
+      }
+    ],
+    "ome": {
+      "version": "0.6",
+      "type": "collection",
+      "name": "ids_int32",
+      "attributes": {
+        "scene": {
+          "coordinateSystems": [
+            {
+              "id": "world",
+              "name": "world",
+              "axes": [
+                {
+                  "name": "x",
+                  "type": "space"
+                },
+                {
+                  "name": "y",
+                  "type": "space"
+                },
+                {
+                  "name": "z",
+                  "type": "space"
+                }
+              ]
+            }
+          ],
+          "coordinateTransformations": []
+        }
+      },
+      "nodes": [
+        {
+          "type": "zv:level",
+          "name": "0"
+        }
+      ]
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

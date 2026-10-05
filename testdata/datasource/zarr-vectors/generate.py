@@ -288,6 +288,75 @@ def main():
             check=True,
         )
 
+    # Objects whose ids are small integers, then a zarr-vectors-tools
+    # polyline pyramid: it writes dense rows into fragment_attributes/
+    # segment_id, which collide with the ids. The viewer must take objects
+    # from the manifests, never guess per value.
+    tracks = [
+        (np.cumsum(rng.normal(scale=3.0, size=(30, 3)), axis=0)
+         + rng.uniform(4, 60, 3)).astype("float32")
+        for _ in range(12)
+    ]
+    tracks = [np.clip(t, 0.5, 63.5) for t in tracks]
+    if ZVTOOLS:
+        write_polylines(
+            fresh("ids_collide"),
+            tracks,
+            chunk_shape=(32.0, 32.0, 32.0),
+            bounds=([0, 0, 0], [64, 64, 64]),
+            object_attributes={
+                "segment_id": np.arange(1, 13, dtype="uint64"),
+                "length": np.array([len(t) for t in tracks], dtype="float32"),
+            },
+        )
+        subprocess.run(
+            [ZVTOOLS, "pyramid", path("ids_collide"), "--coarsen", "1",
+             "--sparsity", "2", "--sparsity-strategy", "length",
+             "--method", "polyline"],
+            check=True,
+        )
+    # A store whose ids are its rows, with an int32 per-fragment id column.
+    write_polylines(
+        fresh("ids_int32"),
+        tracks,
+        chunk_shape=(32.0, 32.0, 32.0),
+        bounds=([0, 0, 0], [64, 64, 64]),
+    )
+    from zarr_vectors.building import (  # noqa: E402
+        create_fragment_attribute_array,
+        get_resolution_level,
+        open_store,
+        read_all_object_manifests,
+        read_vertex_fragment_index,
+        write_chunk_fragment_attributes,
+    )
+
+    level = get_resolution_level(open_store(path("ids_int32"), mode="r+"), 0)
+    owners = {}
+    for row, manifest in enumerate(read_all_object_manifests(level)):
+        for chunk, fragment in manifest:
+            owners.setdefault(tuple(int(c) for c in chunk), {})[int(fragment)] = row
+    create_fragment_attribute_array(level, "segment_id", dtype="int32")
+    for chunk, rows in owners.items():
+        column = np.zeros(len(read_vertex_fragment_index(level, chunk)), "int32")
+        for fragment, row in rows.items():
+            column[fragment] = row
+        write_chunk_fragment_attributes(
+            level, "segment_id", chunk, column, dtype=np.int32
+        )
+    # zarr-vectors-py's own pyramid writes no vertex attributes at its
+    # coarse level: they are unknown there, not zero.
+    write_polylines(
+        fresh("attrs_coarse"),
+        tracks,
+        chunk_shape=(32.0, 32.0, 32.0),
+        bounds=([0, 0, 0], [64, 64, 64]),
+        vertex_attributes={
+            "radius": [np.full(len(t), 2.0 + i, "float32") for i, t in enumerate(tracks)],
+        },
+    )
+    build_pyramid(path("attrs_coarse"), factors=[(2, 2)])
+
     expected = {
         "mesh_lod": {
             "positions": lod_positions.tolist(),

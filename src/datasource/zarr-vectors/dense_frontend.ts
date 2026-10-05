@@ -582,6 +582,12 @@ void zvUserMain();
     const userMain = shaderCodeWithLineDirective(
       state.parseResult.code,
     ).replace(/\bvoid\s+main\s*\(\s*\)/, "void zvUserMain()");
+    // Bare attribute names too, as Neuroglancer's skeleton layer has them,
+    // so one shader serves this layer and `objects`; defined after the
+    // layer's own code so they cannot rename anything in it.
+    builder.addFragmentCode(
+      this.attributes.map((a) => `#define ${a.id} prop_${a.id}()\n`).join(""),
+    );
     builder.addFragmentCode(userMain);
     builder.setFragmentMain(`
 zvResolveSegment();

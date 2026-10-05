@@ -1,0 +1,20 @@
+{
+  "attributes": {
+    "zarr_vectors_level": {
+      "level": 1,
+      "object_sparsity": 0.5,
+      "vertex_count": 1,
+      "coarsening_method": "per_object",
+      "parent_level": 0,
+      "arrays_present": [
+        "vertices",
+        "object_index"
+      ],
+      "preserves_object_ids": true,
+      "inherited_num_objects": 12,
+      "shared_fragments": true
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

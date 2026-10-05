@@ -46,10 +46,7 @@ import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js
 import { LevelCells } from "#src/datasource/zarr-vectors/level_cells.js";
 import { CrossChunkLinks } from "#src/datasource/zarr-vectors/links.js";
 import { decodeObjectManifest } from "#src/datasource/zarr-vectors/object_manifest.js";
-import {
-  readObjectTable,
-  SegmentIdIndex,
-} from "#src/datasource/zarr-vectors/objects.js";
+import { readObjectTable } from "#src/datasource/zarr-vectors/objects.js";
 import type {
   ZarrVectorsLevel,
   ZarrVectorsStoreAccess,
@@ -125,6 +122,9 @@ async function fragmentOwners(
   );
 }
 
+/** The id of a fragment no object claims. */
+const NO_OBJECT = 0xffffffffffffffffn;
+
 interface Ghost {
   /** The local vertex the bridge starts from. */
   host: number;
@@ -138,8 +138,11 @@ export class LevelPipeline {
   private cells: LevelCells;
   private links: CrossChunkLinks | undefined;
   private owners: Promise<Map<string, BigUint64Array> | undefined> | undefined;
-  private ids:
-    | Promise<{ index: SegmentIdIndex; segmentIds: BigUint64Array } | undefined>
+  private mode:
+    | Promise<{
+        mode: "direct" | "object_id" | "manifests";
+        segmentIds?: BigUint64Array;
+      }>
     | undefined;
   private id = nextPipelineId++;
 
@@ -176,60 +179,38 @@ export class LevelPipeline {
   }
 
   /**
-   * The object table, when its segment ids are not simply row numbers. A
-   * stored per-fragment `segment_id` may hold either the object's segment id
-   * or its dense row (zarr-vectors-tools writes rows where a coarsener needs
-   * them), so ids are resolved against it.
+   * How this level's fragments find their objects, decided once for the
+   * level rather than guessed per value:
+   * - `direct`: the store's ids are its rows (no id column, or one that is
+   *   the identity), so a stored `segment_id` is both and is used as is;
+   * - `object_id`: the level has `fragment_attributes/object_id`, always a
+   *   dense row, which maps through the object table;
+   * - `manifests`: neither; a `segment_id` column could hold ids or rows
+   *   (zarr-vectors-tools writes rows where a coarsener needs them), so the
+   *   manifests, which are never ambiguous, say.
    */
-  private idTable() {
-    this.ids ??= readObjectTable(this.access, this.level.path)
-      .then((table) =>
-        table === undefined || table.idSource === "row"
-          ? undefined
-          : {
-              index: new SegmentIdIndex(table.segmentIds),
-              segmentIds: table.segmentIds,
-            },
-      )
-      .catch(() => undefined);
-    return this.ids;
-  }
-
-  /** `ids` (two uint32 per vertex), each a segment id or a dense row. */
-  private async resolveIds(ids: Uint32Array): Promise<Uint32Array> {
-    if (!this.description.hasObjects) return ids;
-    const table = await this.idTable();
-    if (table === undefined) return ids;
-    let out = ids;
-    let lastLo = -1;
-    let lastHi = -1;
-    let mappedLo = 0;
-    let mappedHi = 0;
-    for (let i = 0; i < ids.length; i += 2) {
-      const lo = ids[i];
-      const hi = ids[i + 1];
-      if (lo !== lastLo || hi !== lastHi) {
-        lastLo = lo;
-        lastHi = hi;
-        mappedLo = lo;
-        mappedHi = hi;
-        const id = (BigInt(hi) << 32n) | BigInt(lo);
-        if (
-          table.index.rowOf(id) === undefined &&
-          id < BigInt(table.segmentIds.length)
-        ) {
-          const mapped = table.segmentIds[Number(id)];
-          mappedLo = Number(mapped & 0xffffffffn);
-          mappedHi = Number(mapped >> 32n);
-        }
+  private idMode() {
+    this.mode ??= (async () => {
+      const table = await readObjectTable(this.access, this.level.path).catch(
+        () => undefined,
+      );
+      if (table === undefined || table.idSource === "row") {
+        return { mode: "direct" as const };
       }
-      if (mappedLo !== lo || mappedHi !== hi) {
-        if (out === ids) out = ids.slice();
-        out[i] = mappedLo;
-        out[i + 1] = mappedHi;
+      const ids = table.segmentIds;
+      let identity = true;
+      for (let i = 0; i < ids.length && identity; ++i) {
+        identity = ids[i] === BigInt(i);
       }
-    }
-    return out;
+      if (identity) return { mode: "direct" as const };
+      if (
+        (await this.cells.reader("fragment_attributes/object_id")) !== undefined
+      ) {
+        return { mode: "object_id" as const, segmentIds: ids };
+      }
+      return { mode: "manifests" as const };
+    })();
+    return this.mode;
   }
 
   private fragmentOwners() {
@@ -280,24 +261,45 @@ export class LevelPipeline {
           return out;
         })
       : undefined;
+    const { mode, segmentIds: table } = description.hasObjects
+      ? await this.idMode()
+      : { mode: "direct" as const, segmentIds: undefined };
     const [decoded, links] = await Promise.all([
       decodeChunk(this.cells, description, chunkKey, signal, {
         relinkedChildren,
         skipFaces: true,
         vertices: this.vertexCell(chunkKey),
+        skipSegmentIds: mode === "manifests",
+        fragmentIdColumn: mode === "object_id" ? "object_id" : "segment_id",
       }),
       linksPromise,
     ]);
     if (decoded === undefined) return undefined;
 
-    let segmentIds =
-      decoded.segmentIds && (await this.resolveIds(decoded.segmentIds));
+    let { segmentIds } = decoded;
     if (segmentIds === undefined) {
       const ids = new Uint32Array(decoded.numVertices * 2);
-      const owners = await this.fragmentOwners().catch(() => undefined);
-      const chunkOwners = owners?.get(chunkKey);
+      const stored = decoded.fragmentIds;
+      let idOf: (f: number) => bigint;
+      if (stored !== undefined && mode === "direct") {
+        idOf = (f) => stored[f];
+      } else if (stored !== undefined && table !== undefined) {
+        idOf = (f) =>
+          stored[f] < BigInt(table.length)
+            ? table[Number(stored[f])]
+            : NO_OBJECT;
+      } else {
+        const owners = await this.fragmentOwners().catch(() => undefined);
+        const chunkOwners = owners?.get(chunkKey);
+        // Without the manifests (warned), colour per fragment in the chunk;
+        // a fragment no object claims is no object.
+        idOf =
+          owners === undefined
+            ? (f) => BigInt(f)
+            : (f) => chunkOwners?.[f] ?? NO_OBJECT;
+      }
       for (let f = 0; f < decoded.fragments.numFragments; ++f) {
-        const id = chunkOwners?.[f] ?? BigInt(f);
+        const id = idOf(f);
         const lo = Number(id & 0xffffffffn);
         const hi = Number(id >> 32n);
         forEachFragmentVertex(decoded.fragments, f, (v) => {
