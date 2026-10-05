@@ -40,6 +40,11 @@ export interface ZarrVectorsGeometryDescription {
   attributes: ZarrVectorsAttribute[];
   /** Whether the store has an object index. */
   hasObjects: boolean;
+  /**
+   * The level whose object table and attributes give the per-object
+   * attributes (`ZarrVectorsAttribute.objectValue`): level 0's path.
+   */
+  objectValuesPath?: string;
 }
 
 class ZarrVectorsSourceParameters {

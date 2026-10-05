@@ -49,7 +49,7 @@ const SUPPORTED = { major: 0, minor: 9, maxPatch: 4 };
 /** Vertex attributes exposed without an `#attributes=` selection. */
 const DEFAULT_ATTRIBUTE_LIMIT = 8;
 /** Attributes that can be shown at once (one texture and varying each). */
-const MAX_ATTRIBUTES = 12;
+export const MAX_ATTRIBUTES = 12;
 
 export type ZarrVectorsLinksConvention =
   | "implicit_sequential"
@@ -67,7 +67,15 @@ export interface ZarrVectorsAttribute {
   components: number;
   /** Category labels of a dictionary-encoded attribute. */
   enumLabels?: string[];
+  /**
+   * Not stored per vertex: an object's value, the same on every vertex of
+   * it (`obj_<column>`, or `obj_group` for its first group's index).
+   */
+  objectValue?: { column: string | undefined };
 }
+
+/** `#attributes=` names with this prefix choose object attributes. */
+export const OBJECT_ATTRIBUTE_PREFIX = "obj:";
 
 /** `zarr.json` of each per-chunk array of a level. */
 export interface ZarrVectorsLevelArrays {
@@ -755,7 +763,8 @@ export async function openZarrVectorsStore(
     paths[0],
     level0Vertices,
     zv,
-    selectedAttributes,
+    // `obj:` names choose object attributes; the frontend handles them.
+    selectedAttributes?.filter((n) => !n.startsWith(OBJECT_ATTRIBUTE_PREFIX)),
     KIND_CAPABILITIES[kind].tangent !== undefined,
     warnings,
     signal,

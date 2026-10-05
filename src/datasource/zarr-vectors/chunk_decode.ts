@@ -280,7 +280,13 @@ export async function decodeChunk(
     links: linksPath === undefined ? undefined : read(linksPath),
     attributes: options.skipAttributes
       ? Promise.resolve([])
-      : Promise.all(attributes.map((a) => read(`vertex_attributes/${a.name}`))),
+      : Promise.all(
+          attributes.map((a) =>
+            a.objectValue !== undefined
+              ? undefined
+              : read(`vertex_attributes/${a.name}`),
+          ),
+        ),
     fragmentIds:
       description.hasObjects && !options.skipSegmentIds
         ? read(
@@ -352,6 +358,10 @@ export async function decodeChunk(
       const bytes = attributeBytes[i];
       const count = numVertices * a.components;
       const path = `vertex_attributes/${a.name}`;
+      // An object's value: filled in by whoever knows the objects.
+      if (a.objectValue !== undefined) {
+        return new Float32Array(count).fill(NaN);
+      }
       if (bytes === undefined) {
         // Not stored here: unknown, not zero (0 can be a real value or code).
         if ((await cells.reader(path)) === undefined) {

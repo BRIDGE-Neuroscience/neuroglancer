@@ -46,7 +46,10 @@ import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js
 import { LevelCells } from "#src/datasource/zarr-vectors/level_cells.js";
 import { CrossChunkLinks } from "#src/datasource/zarr-vectors/links.js";
 import { decodeObjectManifest } from "#src/datasource/zarr-vectors/object_manifest.js";
-import { readObjectTable } from "#src/datasource/zarr-vectors/objects.js";
+import {
+  readObjectTable,
+  readShaderObjectValues,
+} from "#src/datasource/zarr-vectors/objects.js";
 import type {
   ZarrVectorsLevel,
   ZarrVectorsStoreAccess,
@@ -120,6 +123,44 @@ async function fragmentOwners(
       BigUint64Array.from(list, (id) => id ?? 0xffffffffffffffffn),
     ]),
   );
+}
+
+/**
+ * Sets each vertex's object values (`obj_<name>`, `obj_group`) from the
+ * object it belongs to: `segmentIds` holds two uint32 per vertex.
+ */
+export async function fillObjectValues(
+  access: ZarrVectorsStoreAccess,
+  description: ZarrVectorsGeometryDescription,
+  attributes: Float32Array[],
+  segmentIds: Uint32Array,
+  numVertices: number,
+) {
+  const slots = description.attributes.flatMap((a, i) =>
+    a.objectValue !== undefined && i < attributes.length ? [i] : [],
+  );
+  if (slots.length === 0 || description.objectValuesPath === undefined) return;
+  const objects = await readShaderObjectValues(
+    access,
+    description.objectValuesPath,
+    slots.map((i) => description.attributes[i].objectValue!),
+  ).catch(() => undefined);
+  if (objects === undefined) return;
+  let lastLo = -1;
+  let lastHi = -1;
+  let row: number | undefined;
+  for (let v = 0; v < numVertices; ++v) {
+    const lo = segmentIds[2 * v];
+    const hi = segmentIds[2 * v + 1];
+    if (lo !== lastLo || hi !== lastHi) {
+      lastLo = lo;
+      lastHi = hi;
+      row = objects.rowOf(BigInt(lo) | (BigInt(hi) << 32n));
+    }
+    slots.forEach((slot, k) => {
+      attributes[slot][v] = row === undefined ? NaN : objects.values[k][row];
+    });
+  }
 }
 
 /** The id of a fragment no object claims. */
@@ -327,6 +368,13 @@ export class LevelPipeline {
       });
     }
     const ghostPositions = await this.ghostPositions(ghosts, signal);
+    await fillObjectValues(
+      this.access,
+      description,
+      decoded.attributes,
+      segmentIds,
+      decoded.numVertices,
+    );
     return assembleChunk(decoded, segmentIds, ghosts, ghostPositions);
   }
 

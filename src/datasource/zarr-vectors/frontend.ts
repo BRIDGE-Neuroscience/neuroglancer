@@ -53,7 +53,9 @@ import {
   meshGridOffset,
   meshLevels,
 } from "#src/datasource/zarr-vectors/mesh_lod.js";
+import type { ShaderObjectValue } from "#src/datasource/zarr-vectors/objects.js";
 import {
+  chooseShaderObjectValues,
   readObjectTable,
   readSegmentProperties,
 } from "#src/datasource/zarr-vectors/objects.js";
@@ -65,6 +67,9 @@ import {
   chunkIndexBounds,
   formatAttributesFragment,
   levelChain,
+  MAX_ATTRIBUTES,
+  OBJECT_ATTRIBUTE_PREFIX,
+  safeAttributeId,
   kvStoreAccess,
   openZarrVectorsStore,
   parseAttributesFragment,
@@ -210,7 +215,59 @@ async function buildDataSource(
       cause: e,
     });
   });
-  const { description, lowerBounds, upperBounds } = store;
+  const { lowerBounds, upperBounds } = store;
+  const warnings = [...store.warnings];
+  // Object attributes and group membership reach shaders as per-vertex
+  // `obj_<name>` / `obj_group`, after the vertex attributes.
+  const description = { ...store.description };
+  if (description.hasObjects) {
+    const requested = selectedAttributes
+      ?.filter((n) => n.startsWith(OBJECT_ATTRIBUTE_PREFIX))
+      .map((n) => n.slice(OBJECT_ATTRIBUTE_PREFIX.length));
+    const chosen: ShaderObjectValue[] = await chooseShaderObjectValues(
+      access,
+      store.levels[0].path,
+      requested,
+      MAX_ATTRIBUTES - description.attributes.length,
+      warnings,
+      signal,
+    ).catch((e) => {
+      signal?.throwIfAborted();
+      warnings.push(
+        `object attributes not offered to shaders: ${e instanceof Error ? e.message : e}`,
+      );
+      return [];
+    });
+    if (chosen.length > 0) {
+      const used = new Set(description.attributes.map((a) => a.id));
+      description.attributes = [
+        ...description.attributes,
+        ...chosen.map((c) => ({
+          name: c.column ?? "group",
+          id: safeAttributeId(`obj_${c.column ?? "group"}`, used),
+          dtype: "float32" as const,
+          components: 1,
+          enumLabels: c.categories,
+          objectValue: { column: c.column },
+        })),
+      ];
+      description.objectValuesPath = store.levels[0].path;
+      // What each code means, for whoever writes the shader.
+      const lines = description.attributes
+        .filter((a) => a.objectValue !== undefined)
+        .map(
+          (a) =>
+            `${a.id}${a.enumLabels ? `: ${a.enumLabels.map((l, i) => `${i}=${l}`).join(", ")}` : ""}`,
+        );
+      console.info(
+        `zarr-vectors: ${storeUrl}: object values in shaders: ${lines.join("; ")}` +
+          (chosen.some((c) => c.column === undefined)
+            ? " (obj_group is the index of the object's first group; " +
+              "group names are the Seg tab's tags, in store order)"
+            : ""),
+      );
+    }
+  }
   // A coarse level that is known to hold nothing would be drawn as the
   // zoomed-out view and the loading stand-in, showing nothing.
   // An empty level that completes an additive one below it is kept: the
@@ -222,7 +279,6 @@ async function buildDataSource(
       level.arrays.vertices.attributes?.nonempty_chunks?.length !== 0 ||
       (all[i - 1].refinement === "add" && level.refinement !== "add"),
   );
-  const warnings = [...store.warnings];
 
   const space = makeCoordinateSpace({
     rank: 3,

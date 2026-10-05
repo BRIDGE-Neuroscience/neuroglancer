@@ -8,6 +8,7 @@ graphs and meshes.
 ```
 <store url>/|zarr-vectors:                     all subsources, default attributes
 <store url>/|zarr-vectors:#attributes=fa,z      choose the vertex attributes
+<store url>/|zarr-vectors:#attributes=fa,obj:kind  ...and object columns for shaders
 zarr-vectors://<store url>                     older form, still accepted
 ```
 
@@ -80,6 +81,36 @@ selection shows every object). Selected objects are left to `objects` /
 `meshes` while those subsources are enabled. The layer's skeleton shader and
 controls apply to both, with `prop_<attribute>()`, `prop_tangent()` and
 `segmentColor()`.
+
+Object values in shaders. Each vertex also carries its object's values, as
+float32 attributes named `obj_<column>` (and `prop_obj_<column>()`), in both
+layers, so one shader colours the overview and the selected objects alike:
+
+- `obj_group`: index (in `groups/`) of the first group the object belongs to,
+  NaN if none; present when the store has groups.
+- `obj_<column>`: the object's value in `object_attributes/<column>`; a
+  dictionary-encoded column gives its code, and the codes are listed in the
+  browser console when the layer opens. A value the store marks absent is
+  NaN (test with `isnan`).
+
+By default the group index and, when the store has at most 8 eligible
+columns (single-channel, numeric or dictionary, not 64-bit), all of them are
+added; with more, none, and a warning says how to choose. `#attributes=`
+chooses the columns explicitly: names with an `obj:` prefix are object
+columns, the rest vertex attributes; 64-bit columns are allowed there, with
+the same precision warning as vertex attributes. The group index is always
+added when the store has groups. Vertex and object values share
+Neuroglancer's limit of 12 attributes; columns that do not fit are left out
+with a warning. Values come from level 0's object
+table; the `meshes` subsource has no shader of its own in Neuroglancer, so
+mesh stores show them only in the dense overview.
+
+```glsl
+void main() {
+  if (isnan(obj_length)) discard;
+  emitRGB(colormapJet(clamp(obj_length / 500.0, 0.0, 1.0)));
+}
+```
 
 One pyramid level is drawn per view: the finest whose vertices, for what the
 view would load, fit one vertex per `renderScale`² pixels (`dense_lod.ts`).
