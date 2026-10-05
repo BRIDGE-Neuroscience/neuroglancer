@@ -75,6 +75,34 @@ export function float16ToNumber(h: number): number {
   return sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
 }
 
+/** The IEEE half-precision bits nearest `x` (ties to even). */
+export function numberToFloat16(x: number): number {
+  if (Number.isNaN(x)) return 0x7e00;
+  const sign = x < 0 || Object.is(x, -0) ? 0x8000 : 0;
+  let a = Math.abs(x);
+  if (a >= 65520) return sign | 0x7c00; // rounds past the largest half
+  if (a < 2 ** -14) {
+    // Subnormal: a multiple of 2^-24.
+    a = a * 2 ** 24;
+    let m = Math.floor(a);
+    const r = a - m;
+    if (r > 0.5 || (r === 0.5 && m & 1)) ++m;
+    return sign | m; // m === 1024 is the smallest normal, as bits
+  }
+  let e = Math.floor(Math.log2(a));
+  if (2 ** e > a) --e;
+  else if (2 ** (e + 1) <= a) ++e;
+  const scaled = (a / 2 ** e - 1) * 1024;
+  let m = Math.floor(scaled);
+  const r = scaled - m;
+  if (r > 0.5 || (r === 0.5 && m & 1)) ++m;
+  if (m === 1024) {
+    m = 0;
+    ++e;
+  }
+  return sign | ((e + 15) << 10) | m;
+}
+
 /** Decodes `count` values of `type` to float32 (zero-copy for aligned float32). */
 export function decodeFloat32(
   bytes: Uint8Array,
