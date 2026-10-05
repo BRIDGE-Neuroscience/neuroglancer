@@ -1074,11 +1074,14 @@ function DenseRenderLayer<
         ? displayState.skeletonRenderingOptions.params2d
         : displayState.skeletonRenderingOptions.params3d;
       const lineWidth = renderOptions.lineWidth.value;
+      // Points follow the width slider, 5 px at each view's default width
+      // (2 in cross-sections, 1 in 3-d), so they can be made smaller too.
       const pointDiameter =
-        helper.primitive === "points" ||
-        renderOptions.mode.value === SkeletonRenderMode.LINES_AND_POINTS
-          ? Math.max(5, lineWidth * 2)
-          : lineWidth;
+        helper.primitive === "points"
+          ? (5 * lineWidth) / (targetIsSliceView ? 2 : 1)
+          : renderOptions.mode.value === SkeletonRenderMode.LINES_AND_POINTS
+            ? Math.max(5, lineWidth * 2)
+            : lineWidth;
       const mvp = mat4.multiply(
         tempMat4,
         projectionParameters.viewProjectionMat,
