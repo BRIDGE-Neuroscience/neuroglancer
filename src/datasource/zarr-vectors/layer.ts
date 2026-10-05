@@ -26,6 +26,7 @@
  * is the only time the subclass is needed.
  */
 
+import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/base.js";
 import type { ZarrVectorsDenseDisplayState } from "#src/datasource/zarr-vectors/dense_frontend.js";
 import {
   PerspectiveViewZarrVectorsDenseLayer,
@@ -79,6 +80,42 @@ export class ZarrVectorsSegmentationUserLayer extends SegmentationUserLayer {
     (this as any).has3dLayer = this.registerDisposer(
       dense(PerspectiveViewZarrVectorsDenseLayer),
     );
+    // The skeleton controls (points or lines, line width and point size per
+    // view, the shader editor) drive the dense layer too, so they are
+    // offered for it; the shader editor lists its attributes.
+    const hasSkeletons = this.hasSkeletonsLayer;
+    (this as any).hasSkeletonsLayer = this.registerDisposer(
+      makeCachedDerivedWatchableValue(
+        (base: boolean, all: readonly unknown[]) =>
+          base ||
+          all.some((x) => x instanceof PerspectiveViewZarrVectorsDenseLayer),
+        [hasSkeletons, layers] as any,
+      ),
+    );
+    const skeletonLayer = this.getSkeletonLayer;
+    (this as any).getSkeletonLayer = () =>
+      skeletonLayer() ?? this.denseShaderAttributes();
+  }
+
+  /** The dense layer's shader inputs, as the skeleton shader editor lists them. */
+  private denseShaderAttributes() {
+    for (const layer of this.renderLayers) {
+      if (!(layer instanceof PerspectiveViewZarrVectorsDenseLayer)) continue;
+      const description: ZarrVectorsGeometryDescription = (layer as any).options
+        .source.description;
+      const vertexAttributes = [
+        { name: "position", glslDataType: "vec3" },
+        ...description.attributes.map((a) => ({
+          name: a.id,
+          glslDataType: a.components === 1 ? "float" : `vec${a.components}`,
+        })),
+      ];
+      if (KIND_CAPABILITIES[description.geometryKind].tangent !== undefined) {
+        vertexAttributes.push({ name: "tangent", glslDataType: "vec3" });
+      }
+      return { vertexAttributes } as any;
+    }
+    return undefined;
   }
 
   activateDataSubsources(subsources: Iterable<LoadedDataSubsource>) {
