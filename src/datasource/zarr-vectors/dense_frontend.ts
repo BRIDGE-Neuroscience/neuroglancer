@@ -48,7 +48,10 @@ import {
   addStringShaderSupport,
   setShaderControls,
 } from "#src/datasource/zarr-vectors/compat.js";
-import { selectDenseLevel } from "#src/datasource/zarr-vectors/dense_lod.js";
+import {
+  denseLevelSpacing,
+  selectDenseLevel,
+} from "#src/datasource/zarr-vectors/dense_lod.js";
 import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js";
 import type { HashMapUint64 } from "#src/gpu_hash/hash_table.js";
 import { GPUHashTable, HashSetShaderManager } from "#src/gpu_hash/shader.js";
@@ -64,6 +67,7 @@ import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_
 import { PerspectiveViewRenderLayer } from "#src/perspective_view/render_layer.js";
 import type { RenderLayerTransformOrError } from "#src/render_coordinate_transform.js";
 import { get3dModelToDisplaySpaceMatrix } from "#src/render_coordinate_transform.js";
+import type { RenderScaleHistogram } from "#src/render_scale_statistics.js";
 import type { RenderLayer } from "#src/renderlayer.js";
 import {
   SegmentColorShaderManager,
@@ -331,6 +335,8 @@ export interface ZarrVectorsDenseDisplayState
   localPosition: WatchableValueInterface<Float32Array>;
   /** `crossSectionRenderScale`: target pixels between vertices in 2-D. */
   renderScaleTarget2d: WatchableValueInterface<number>;
+  /** The "Resolution (slice)" histogram; 3-d views use `renderScaleHistogram`. */
+  renderScaleHistogram2d: RenderScaleHistogram;
   /**
    * Whether the layer also draws the selected objects at full resolution
    * through Neuroglancer's skeleton layer; then they are left out here.
@@ -778,6 +784,8 @@ function DenseRenderLayer<
         displayState as unknown as SegmentationDisplayState3D,
         this,
       );
+      // The Render tab's resolution slider shows the levels this draws.
+      this.registerDisposer(this.histogram.visibility.add(this.visibility));
       const redraw = () => this.redrawNeeded.dispatch();
       const options3d = displayState.skeletonRenderingOptions;
       for (const value of [
@@ -804,6 +812,13 @@ function DenseRenderLayer<
 
     get options() {
       return this.shared.options;
+    }
+
+    private get histogram(): RenderScaleHistogram {
+      const { displayState } = this.options;
+      return targetIsSliceView
+        ? displayState.renderScaleHistogram2d
+        : displayState.renderScaleHistogram;
     }
 
     get gl() {
@@ -896,7 +911,12 @@ function DenseRenderLayer<
     private chunksToDraw(
       projectionParameters: any,
       transformed: FrontendTransformedSource[],
-    ): { ready: boolean; chunks: ZarrVectorsDenseChunk[] } {
+    ): {
+      ready: boolean;
+      chunks: ZarrVectorsDenseChunk[];
+      /** For the resolution histogram: chunks drawn and missing, by level. */
+      levels: { level: number; present: number; missing: number }[];
+    } {
       const { displayState, source } = this.options;
       const renderScaleTarget = targetIsSliceView
         ? displayState.renderScaleTarget2d.value
@@ -916,6 +936,9 @@ function DenseRenderLayer<
       const base = drawn[drawn.length - 1];
       const missing: Float32Array[] = [];
       let ready = true;
+      // The view is the target's chain as a whole, so one histogram row.
+      const view = { level: target, present: 0, missing: 0 };
+      const levels = [view];
       for (const level of drawn) {
         const tsource = transformed[level];
         forEachVisibleVolumetricChunk(
@@ -929,8 +952,10 @@ function DenseRenderLayer<
             ).chunks.get(key) as ZarrVectorsDenseChunk | undefined;
             if (chunk !== undefined && chunk.state === ChunkState.GPU_MEMORY) {
               chunks.push(chunk);
+              ++view.present;
             } else {
               ready = false;
+              ++view.missing;
               // The last level of the chain is complete on its own; a
               // missing chunk of it leaves a hole the coarsest level fills.
               if (level === base) {
@@ -948,6 +973,12 @@ function DenseRenderLayer<
         const coarseSource = coarse.source;
         const coarseSize = coarseSource.spec.chunkDataSize;
         const seen = new Set<string>();
+        const standIn = {
+          level: transformed.length - 1,
+          present: 0,
+          missing: 0,
+        };
+        levels.push(standIn);
         for (const position of missing) {
           const coords = Array.from(position, (c, d) =>
             Math.floor(((c + 0.5) * targetSize[d]) / coarseSize[d]),
@@ -960,10 +991,11 @@ function DenseRenderLayer<
             | undefined;
           if (chunk !== undefined && chunk.state === ChunkState.GPU_MEMORY) {
             chunks.push(chunk);
+            ++standIn.present;
           }
         }
       }
-      return { ready, chunks };
+      return { ready, chunks, levels };
     }
 
     draw(
@@ -989,10 +1021,25 @@ function DenseRenderLayer<
       if (modelMatrix === undefined) return;
       const transformed = attachment.state!.sources.value;
       if (transformed.length === 0 || transformed[0].length === 0) return;
-      const { chunks } = this.chunksToDraw(
+      const { chunks, levels } = this.chunksToDraw(
         projectionParameters,
         transformed[0],
       );
+      const { histogram } = this;
+      histogram.begin(
+        this.options.chunkManager.chunkQueueManager.frameNumberCounter
+          .frameNumber,
+      );
+      for (const { level, present, missing } of levels) {
+        const { physicalSpacing, pixelSpacing } = denseLevelSpacing(
+          projectionParameters,
+          transformed[0],
+          this.options.source.densities,
+          level,
+          targetIsSliceView,
+        );
+        histogram.add(physicalSpacing, pixelSpacing, present, missing);
+      }
       void (attachment as VisibleLayerInfo<LayerView, DenseAttachmentState>);
       if (chunks.length === 0) return;
 

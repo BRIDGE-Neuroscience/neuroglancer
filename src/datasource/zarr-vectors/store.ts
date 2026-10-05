@@ -638,6 +638,12 @@ export async function openZarrVectorsStore(
 ): Promise<ZarrVectorsStore> {
   const { read } = access;
   const root = await readJson(read, "zarr.json", signal);
+  if (root === undefined) {
+    throw new Error(
+      "no zarr.json found: the URL must be the store's root folder (the one " +
+        "holding zarr.json), served by a running server",
+    );
+  }
   const zv = root?.attributes?.zarr_vectors;
   if (zv === undefined) {
     throw new Error(

@@ -83,7 +83,9 @@ controls apply to both, with `prop_<attribute>()`, `prop_tangent()` and
 
 One pyramid level is drawn per view: the finest whose vertices, for what the
 view would load, fit one vertex per `renderScale`² pixels (`dense_lod.ts`).
-The coarsest level stands in while it loads. A level without a vertex count
+The coarsest level stands in while it loads. The Render tab's "Resolution
+(slice)" and "Resolution (mesh)" sliders set the target, and their
+histograms show the level drawn and its chunks, loaded and not. A level without a vertex count
 (or with 0, which writers also use as a placeholder) is estimated from its
 neighbours; a coarse level known to be empty is not used; a flat store (one
 plane) is measured as one stored unit thick.

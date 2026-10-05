@@ -62,21 +62,18 @@ function viewFrustumVolume(projectionMat: mat4) {
 const MIN_EXTENT = 1;
 
 /**
- * Index (0 = finest) of the level to draw for this view.  `densities` are
- * vertices per unit volume of each level, finest first.
+ * What each level would LOAD for a view, in stored units: a cross-section
+ * loads every chunk the plane cuts, so a slab one chunk deep; a 3-d view
+ * loads what its frustum covers. Also the volume of one stored unit in
+ * display (canonical) units.
  */
-export function selectDenseLevel(
+function loadedVolumes(
   projectionParameters: ProjectionParameters,
   transformedSources: readonly TransformedSource<any, any>[],
-  densities: readonly number[],
-  renderScaleTarget: number,
   isSliceView: boolean,
-): number {
-  const numLevels = transformedSources.length;
-  if (numLevels <= 1) return 0;
+): { loadedVolume: (level: number) => number; unitVolume: number } {
   const { projectionMat, viewMatrix, width, height } = projectionParameters;
   const base = transformedSources[0];
-  // Volume and length of one stored unit in display (canonical) units.
   const unitVolume = Math.abs(base.chunkLayout.detTransform);
   const unitLength = Math.cbrt(unitVolume);
   const extent: number[] = [];
@@ -90,15 +87,11 @@ export function selectDenseLevel(
     );
   }
   const sourceVolume = extent[0] * extent[1] * extent[2];
-  // What each level would LOAD for this view, in stored units.  A
-  // cross-section loads every chunk the plane cuts, so a slab one chunk deep;
-  // a 3-d view loads what its frustum covers.
   // The view matrix scales display units to view units (a slice view's are
   // pixels); undo it to measure the view in display units.
   const viewDet = Math.abs(
     mat3.determinant(mat3FromMat4(tempMat3, viewMatrix)),
   );
-  let loadedVolume: (level: number) => number;
   // Asked of the panel, not read off the projection: an orthographic 3-d
   // view has the same kind of projection matrix as a cross-section.
   if (isSliceView) {
@@ -108,25 +101,77 @@ export function selectDenseLevel(
     const viewArea =
       Math.min(width * pixelSize, sortedExtent[0]) *
       Math.min(height * pixelSize, sortedExtent[1]);
-    loadedVolume = (level) => {
-      const chunk = transformedSources[level].source.spec.chunkDataSize;
-      const depth = Math.min(
-        Math.cbrt(chunk[0] * chunk[1] * chunk[2]),
-        sortedExtent[2],
-      );
-      return viewArea * depth;
+    return {
+      unitVolume,
+      loadedVolume: (level) => {
+        const chunk = transformedSources[level].source.spec.chunkDataSize;
+        const depth = Math.min(
+          Math.cbrt(chunk[0] * chunk[1] * chunk[2]),
+          sortedExtent[2],
+        );
+        return viewArea * depth;
+      },
     };
-  } else {
-    const frustum = viewFrustumVolume(projectionMat) / viewDet / unitVolume;
-    const volume = Math.min(frustum, sourceVolume);
-    loadedVolume = () => volume;
   }
+  const frustum = viewFrustumVolume(projectionMat) / viewDet / unitVolume;
+  const volume = Math.min(frustum, sourceVolume);
+  return { unitVolume, loadedVolume: () => volume };
+}
+
+/**
+ * Index (0 = finest) of the level to draw for this view.  `densities` are
+ * vertices per unit volume of each level, finest first.
+ */
+export function selectDenseLevel(
+  projectionParameters: ProjectionParameters,
+  transformedSources: readonly TransformedSource<any, any>[],
+  densities: readonly number[],
+  renderScaleTarget: number,
+  isSliceView: boolean,
+): number {
+  const numLevels = transformedSources.length;
+  if (numLevels <= 1) return 0;
+  const { width, height } = projectionParameters;
+  const { loadedVolume } = loadedVolumes(
+    projectionParameters,
+    transformedSources,
+    isSliceView,
+  );
   // Vertex budget: one per `renderScaleTarget`^2 pixels.
   const budget = (width * height) / Math.max(renderScaleTarget, 1e-3) ** 2;
   for (let level = 0; level < numLevels - 1; ++level) {
     if (densities[level] * loadedVolume(level) <= budget) return level;
   }
   return numLevels - 1;
+}
+
+/**
+ * A level's sample spacing for the layer's resolution histogram, as
+ * Neuroglancer's spatially indexed annotations report theirs: physically
+ * (the cube root of the volume per vertex), and on screen (pixels per
+ * vertex if the vertices the view loads covered it evenly). A level is
+ * drawn once its pixel spacing reaches the resolution slider's target.
+ */
+export function denseLevelSpacing(
+  projectionParameters: ProjectionParameters,
+  transformedSources: readonly TransformedSource<any, any>[],
+  densities: readonly number[],
+  level: number,
+  isSliceView: boolean,
+): { physicalSpacing: number; pixelSpacing: number } {
+  const { width, height, displayDimensionRenderInfo } = projectionParameters;
+  const { loadedVolume, unitVolume } = loadedVolumes(
+    projectionParameters,
+    transformedSources,
+    isSliceView,
+  );
+  const density = densities[level];
+  const physicalUnitVolume =
+    unitVolume * prod3(displayDimensionRenderInfo.voxelPhysicalScales);
+  return {
+    physicalSpacing: Math.cbrt(physicalUnitVolume / density),
+    pixelSpacing: Math.sqrt((width * height) / (density * loadedVolume(level))),
+  };
 }
 
 /**
