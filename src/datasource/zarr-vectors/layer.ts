@@ -44,7 +44,10 @@ import {
 import type { LoadedDataSubsource } from "#src/layer/layer_data_source.js";
 import { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
 import { VolumeType } from "#src/sliceview/volume/base.js";
-import { WatchableValue } from "#src/trackable_value.js";
+import {
+  makeCachedDerivedWatchableValue,
+  WatchableValue,
+} from "#src/trackable_value.js";
 
 /** Subsource ids that draw selected objects at full resolution. */
 const OBJECT_SUBSOURCE_IDS = new Set(["objects", "meshes"]);
@@ -56,6 +59,27 @@ function denseSource(subsource: LoadedDataSubsource) {
 
 export class ZarrVectorsSegmentationUserLayer extends SegmentationUserLayer {
   private objectsDrawnElsewhere = new WatchableValue(false);
+
+  constructor(...args: ConstructorParameters<typeof SegmentationUserLayer>) {
+    super(...args);
+    // The Render tab offers its resolution sliders only where the base
+    // class sees one of its own 2-d / 3-d render layers; the dense layers
+    // count too. Wrapped rather than rewritten, so whatever the base class
+    // counts (it differs between Neuroglancer versions) still counts.
+    const layers = { changed: this.layersChanged, value: this.renderLayers };
+    const dense = (type: new (...a: any[]) => unknown) =>
+      makeCachedDerivedWatchableValue(
+        (base: boolean, all: readonly unknown[]) =>
+          base || all.some((x) => x instanceof type),
+        [this.has2dLayer, layers] as any,
+      );
+    (this as any).has2dLayer = this.registerDisposer(
+      dense(SliceViewPanelZarrVectorsDenseLayer),
+    );
+    (this as any).has3dLayer = this.registerDisposer(
+      dense(PerspectiveViewZarrVectorsDenseLayer),
+    );
+  }
 
   activateDataSubsources(subsources: Iterable<LoadedDataSubsource>) {
     const rest: LoadedDataSubsource[] = [];
@@ -90,6 +114,7 @@ export class ZarrVectorsSegmentationUserLayer extends SegmentationUserLayer {
             transform: loadedSubsource.getRenderLayerTransform(),
             localPosition: this.localPosition,
             renderScaleTarget2d: this.sliceViewRenderScaleTarget,
+            renderScaleHistogram2d: this.sliceViewRenderScaleHistogram,
             objectsDrawnElsewhere: this.objectsDrawnElsewhere,
           },
         );

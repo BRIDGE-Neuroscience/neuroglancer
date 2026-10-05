@@ -200,7 +200,16 @@ async function buildDataSource(
   signal: AbortSignal | undefined,
 ): Promise<DataSource> {
   const access = kvStoreAccess(context.kvStoreContext, storeUrl);
-  const store = await openZarrVectorsStore(access, selectedAttributes, signal);
+  const store = await openZarrVectorsStore(
+    access,
+    selectedAttributes,
+    signal,
+  ).catch((e) => {
+    signal?.throwIfAborted();
+    throw new Error(`${storeUrl}: ${e instanceof Error ? e.message : e}`, {
+      cause: e,
+    });
+  });
   const { description, lowerBounds, upperBounds } = store;
   // A coarse level that is known to hold nothing would be drawn as the
   // zoomed-out view and the loading stand-in, showing nothing.
