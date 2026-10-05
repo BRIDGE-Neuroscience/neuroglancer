@@ -63,6 +63,7 @@ import type { ElementType } from "#src/datasource/zarr-vectors/dtype.js";
 import {
   ELEMENT_BYTES,
   isElementType,
+  numberToFloat16,
 } from "#src/datasource/zarr-vectors/dtype.js";
 import { AsyncLru, mapConcurrent } from "#src/datasource/zarr-vectors/util.js";
 import type { ByteRangeRequest } from "#src/kvstore/index.js";
@@ -127,23 +128,77 @@ export type ZarrArrayRead = (
 
 /**
  * Element type of an array.  Fixed-size dtypes are interpreted by callers
- * from `elementBytes`; `vlen` marks variable-length bytes or strings.
+ * from `elementBytes`; `vlen` marks variable-length bytes or strings;
+ * `utf32` is zarr-python's `fixed_length_utf32` (numpy `<U`), whose elements
+ * are `elementBytes / 4` UTF-32 code points padded with zeros.
  */
-export type ZarrElementType = ElementType | "vlen";
+export type ZarrElementType = ElementType | "vlen" | "utf32";
 
-function parseElementType(dataType: unknown): ZarrElementType {
-  if (typeof dataType !== "string") {
-    throw new Error(`unsupported zarr data_type ${JSON.stringify(dataType)}`);
-  }
-  switch (dataType) {
+interface ParsedDataType {
+  elementType: ZarrElementType;
+  elementBytes: number;
+  /** How elements decode to text; `undefined` for numbers and raw bytes. */
+  stringEncoding: "utf8" | "utf32" | undefined;
+}
+
+function parseDataType(dataType: unknown): ParsedDataType {
+  const name =
+    typeof dataType === "string" ? dataType : (dataType as any)?.name;
+  switch (name) {
     case "variable_length_bytes":
     case "bytes":
+      return {
+        elementType: "vlen",
+        elementBytes: 0,
+        stringEncoding: undefined,
+      };
     case "string":
     case "variable_length_utf8":
-      return "vlen";
+      return { elementType: "vlen", elementBytes: 0, stringEncoding: "utf8" };
+    case "fixed_length_utf32": {
+      const length = Number((dataType as any)?.configuration?.length_bytes);
+      if (Number.isInteger(length) && length > 0 && length % 4 === 0) {
+        return {
+          elementType: "utf32",
+          elementBytes: length,
+          stringEncoding: "utf32",
+        };
+      }
+      break;
+    }
   }
-  if (isElementType(dataType)) return dataType;
+  if (typeof dataType === "string" && isElementType(dataType)) {
+    return {
+      elementType: dataType,
+      elementBytes: ELEMENT_BYTES[dataType],
+      stringEncoding: undefined,
+    };
+  }
   throw new Error(`unsupported zarr data_type ${JSON.stringify(dataType)}`);
+}
+
+/**
+ * `JSON.parse` for a `zarr.json`, keeping integer fill values exact: a
+ * 64-bit sentinel such as 18446744073709551615 would otherwise round to
+ * 2^64.  Long integer `fill_value` literals are read as decimal strings,
+ * which {@link fillBytes} accepts.
+ */
+export function parseZarrJsonText(text: string): any {
+  return JSON.parse(
+    text.replace(/("fill_value"\s*:\s*)(-?\d{16,})(?=\s*[,}\]])/g, '$1"$2"'),
+  );
+}
+
+/** Decodes one `utf32` element: code points up to the first zero. */
+export function decodeUtf32(bytes: Uint8Array, bigEndian = false): string {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let out = "";
+  for (let i = 0; i + 4 <= bytes.length; i += 4) {
+    const code = view.getUint32(i, !bigEndian);
+    if (code === 0) break;
+    out += code <= 0x10ffff ? String.fromCodePoint(code) : "\ufffd";
+  }
+  return out;
 }
 
 export interface ZarrShardingSpec {
@@ -163,6 +218,8 @@ export interface ZarrArray {
   elementType: ZarrElementType;
   /** Bytes per element; 0 for variable-length arrays. */
   elementBytes: number;
+  /** Text encoding of a string array; `undefined` otherwise. */
+  stringEncoding: "utf8" | "utf32" | undefined;
   bigEndian: boolean;
   /** Shape of the unit the codec chain decodes (the inner chunk if sharded). */
   readChunkShape: number[];
@@ -273,8 +330,9 @@ export function parseZarrArrayMetadata(path: string, json: any): ZarrArray {
   }
   const shape = verifyIntArray(json.shape, `${where} shape`);
   const rank = shape.length;
-  const elementType = parseElementType(json.data_type);
-  const elementBytes = elementType === "vlen" ? 0 : ELEMENT_BYTES[elementType];
+  const { elementType, elementBytes, stringEncoding } = parseDataType(
+    json.data_type,
+  );
   if (json.chunk_grid?.name !== "regular") {
     throw new Error(`${where}: only regular chunk grids are supported`);
   }
@@ -373,6 +431,7 @@ export function parseZarrArrayMetadata(path: string, json: any): ZarrArray {
     shape,
     elementType,
     elementBytes,
+    stringEncoding,
     bigEndian,
     readChunkShape,
     storedChunkShape,
@@ -401,7 +460,7 @@ export async function openZarrArray(
 ): Promise<ZarrArray | undefined> {
   const bytes = await read(joinPath(path, "zarr.json"), { signal });
   if (bytes === undefined) return undefined;
-  const json = JSON.parse(new TextDecoder().decode(bytes));
+  const json = parseZarrJsonText(new TextDecoder().decode(bytes));
   if (json?.node_type !== "array") return undefined;
   return parseZarrArrayMetadata(path, json);
 }
@@ -860,9 +919,9 @@ export class ZarrArrayReader {
         dst,
       );
     });
-    if (array.bigEndian && array.elementBytes > 1) {
-      swapEndian(out, array.elementBytes);
-    }
+    // A UTF-32 element is a run of 4-byte code units.
+    const unit = array.elementType === "utf32" ? 4 : array.elementBytes;
+    if (array.bigEndian && unit > 1) swapEndian(out, unit);
     return out;
   }
 
@@ -950,46 +1009,113 @@ export function decodeVlenElements(chunk: Uint8Array): Uint8Array[] {
   return out;
 }
 
-/** Little-endian bytes of one fill-value element. */
-function fillBytes(array: ZarrArray): Uint8Array {
+/** `value` as a 64-bit integer, clamped to `[min, max]`. */
+function fillBigInt(value: unknown, min: bigint, max: bigint): bigint {
+  let out = 0n;
+  if (typeof value === "string" && /^-?\d+$/.test(value)) {
+    out = BigInt(value);
+  } else if (typeof value === "number" && Number.isFinite(value)) {
+    // A literal past 2^53 that was parsed as a number has been rounded; the
+    // clamp still recovers the extreme sentinels (2^64 - 1 reads as 2^64).
+    out = BigInt(Math.trunc(value));
+  } else if (typeof value === "boolean") {
+    out = value ? 1n : 0n;
+  }
+  return out < min ? min : out > max ? max : out;
+}
+
+/**
+ * Bytes of one fill-value element, in the array's byte order: what a chunk
+ * the writer never stored (zarr-python skips chunks that are all fill)
+ * reads as.
+ */
+export function fillBytes(array: ZarrArray): Uint8Array {
   const out = new Uint8Array(array.elementBytes);
   const view = new DataView(out.buffer);
-  let value = array.fillValue;
-  if (value === null || value === undefined) return out;
-  if (value === "NaN") value = Number.NaN;
-  else if (value === "Infinity") value = Number.POSITIVE_INFINITY;
-  else if (value === "-Infinity") value = Number.NEGATIVE_INFINITY;
-  if (typeof value === "boolean") value = value ? 1 : 0;
-  if (typeof value !== "number" && typeof value !== "string") return out;
-  switch (array.elementType) {
-    case "float32":
-      view.setFloat32(0, Number(value), true);
-      break;
-    case "float64":
-      view.setFloat64(0, Number(value), true);
-      break;
-    case "int64":
-      view.setBigInt64(0, BigInt(value), true);
-      break;
-    case "uint64":
-      view.setBigUint64(0, BigInt.asUintN(64, BigInt(value)), true);
-      break;
-    case "int32":
-      view.setInt32(0, Number(value), true);
-      break;
-    case "uint32":
-      view.setUint32(0, Number(value), true);
-      break;
-    case "int16":
-      view.setInt16(0, Number(value), true);
-      break;
-    case "uint16":
-    case "float16":
-      view.setUint16(0, Number(value), true);
-      break;
-    default:
-      view.setUint8(0, Number(value));
+  const value = array.fillValue;
+  const type = array.elementType;
+  if (value === null || value === undefined || out.length === 0) return out;
+  if (type === "utf32") {
+    if (typeof value === "string") {
+      let offset = 0;
+      for (const ch of value) {
+        if (offset + 4 > out.length) break;
+        view.setUint32(offset, ch.codePointAt(0)!, true);
+        offset += 4;
+      }
+    }
+  } else if (typeof value === "string" && /^0x[0-9a-f]+$/i.test(value)) {
+    // zarr v3 spells a float fill such as a NaN payload as its raw bits.
+    const bits = BigInt(value);
+    switch (out.length) {
+      case 1:
+        view.setUint8(0, Number(bits & 0xffn));
+        break;
+      case 2:
+        view.setUint16(0, Number(bits & 0xffffn), true);
+        break;
+      case 4:
+        view.setUint32(0, Number(bits & 0xffffffffn), true);
+        break;
+      case 8:
+        view.setBigUint64(0, BigInt.asUintN(64, bits), true);
+        break;
+    }
+  } else {
+    const number =
+      typeof value === "boolean"
+        ? Number(value)
+        : value === "NaN"
+          ? Number.NaN
+          : value === "Infinity"
+            ? Number.POSITIVE_INFINITY
+            : value === "-Infinity"
+              ? Number.NEGATIVE_INFINITY
+              : Number(value);
+    switch (type) {
+      case "float16":
+        view.setUint16(0, numberToFloat16(number), true);
+        break;
+      case "float32":
+        view.setFloat32(0, number, true);
+        break;
+      case "float64":
+        view.setFloat64(0, number, true);
+        break;
+      case "int64":
+        view.setBigInt64(
+          0,
+          fillBigInt(value, -(2n ** 63n), 2n ** 63n - 1n),
+          true,
+        );
+        break;
+      case "uint64":
+        view.setBigUint64(0, fillBigInt(value, 0n, 2n ** 64n - 1n), true);
+        break;
+      case "int32":
+        view.setInt32(0, number, true);
+        break;
+      case "uint32":
+        view.setUint32(0, number, true);
+        break;
+      case "int16":
+        view.setInt16(0, number, true);
+        break;
+      case "uint16":
+        view.setUint16(0, number, true);
+        break;
+      case "int8":
+        view.setInt8(0, number);
+        break;
+      case "bool":
+        view.setUint8(0, number ? 1 : 0);
+        break;
+      default:
+        view.setUint8(0, number);
+    }
   }
+  // `readRows` swaps whole rows of a big-endian array after filling.
+  if (array.bigEndian) swapEndian(out, type === "utf32" ? 4 : out.length);
   return out;
 }
 
