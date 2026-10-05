@@ -100,7 +100,10 @@ export async function readObjectTable(
       `${levelPath}/object_index/manifests/zarr.json`,
       signal,
     ),
-    openReader(access, `${levelPath}/object_index/object_ids`, signal),
+    // Only the v2 layout has object ids; v1 rows are the ids.
+    objectIndexAttrs.layout === "vlen_manifests_v1"
+      ? undefined
+      : openReader(access, `${levelPath}/object_index/object_ids`, signal),
     openReader(access, `${levelPath}/object_attributes/segment_id`, signal),
   ]);
   let numObjects = Number(objectIndexAttrs.num_objects);

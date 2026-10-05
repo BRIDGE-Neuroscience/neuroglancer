@@ -549,8 +549,9 @@ vec4 segmentColor() {
     if (edges) {
       builder.addFragmentCode(`
 void emitRGBA(vec4 color) {
-  float a = color.a * ${alpha};
-  emit(vec4(color.rgb * a, a), vPickID);
+  // As Neuroglancer's skeleton layer: colour premultiplied by the object's
+  // opacity; the line's edge coverage only in alpha.
+  emit(vec4(color.rgb * color.a, color.a * ${alpha}), vPickID);
 }
 void emitRGB(vec3 color) {
   emitRGBA(vec4(color, zvAlpha));
@@ -825,8 +826,17 @@ function DenseRenderLayer<
       return this.options.chunkManager.chunkQueueManager.gl;
     }
 
+    /**
+     * Opaque (depth-tested, the nearest curve wins) unless something is
+     * drawn partly transparent, as Neuroglancer's skeleton layer decides:
+     * the transparent pass blends every overlapping curve's colour, which
+     * in a dense bundle reads as a change of hue rather than a fade.
+     */
     get isTransparent() {
-      return true;
+      if (targetIsSliceView) return true;
+      const { objectAlpha, notSelectedAlpha } = this.options.displayState;
+      const hidden = notSelectedAlpha.value;
+      return objectAlpha.value < 1 || (hidden > 0 && hidden < 1);
     }
 
     attach(attachment: VisibleLayerInfo<LayerView, DenseAttachmentState>) {
@@ -1030,15 +1040,25 @@ function DenseRenderLayer<
         this.options.chunkManager.chunkQueueManager.frameNumberCounter
           .frameNumber,
       );
-      for (const { level, present, missing } of levels) {
-        const { physicalSpacing, pixelSpacing } = denseLevelSpacing(
+      const spacing = (level: number) =>
+        denseLevelSpacing(
           projectionParameters,
           transformed[0],
           this.options.source.densities,
           level,
           targetIsSliceView,
         );
+      for (const { level, present, missing } of levels) {
+        const { physicalSpacing, pixelSpacing } = spacing(level);
         histogram.add(physicalSpacing, pixelSpacing, present, missing);
+      }
+      // Every other level as a marker (display only, as Neuroglancer's
+      // skeleton layer marks its grid levels), so each can be found on the
+      // slider: setting the target at a level's marker draws that level.
+      for (let level = 0; level < transformed[0].length; ++level) {
+        if (levels.some((l) => l.level === level)) continue;
+        const { physicalSpacing, pixelSpacing } = spacing(level);
+        histogram.add(physicalSpacing, pixelSpacing, 0, 1, true);
       }
       void (attachment as VisibleLayerInfo<LayerView, DenseAttachmentState>);
       if (chunks.length === 0) return;
