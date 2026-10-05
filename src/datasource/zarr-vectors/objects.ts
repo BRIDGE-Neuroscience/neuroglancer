@@ -1067,3 +1067,207 @@ export async function readSegmentProperties(
   }
   return { ids: segmentIds, properties };
 }
+
+// -------------------------------------------------------------- shaders
+
+/**
+ * Object values a shader reads per vertex: `obj_<column>` for a level-0
+ * object attribute, `obj_group` for the index of an object's first group.
+ */
+export interface ShaderObjectValue {
+  /** `object_attributes/<name>`, or `undefined` for the group index. */
+  column: string | undefined;
+  /** Category labels of a dictionary column (the shader sees the code). */
+  categories?: string[];
+}
+
+/** Object values offered by default when a store has at most this many. */
+const DEFAULT_SHADER_COLUMNS = 8;
+
+/**
+ * The object values to hand to shaders, within `budget` (shader inputs left
+ * after the vertex attributes). `requested` names columns explicitly (from
+ * `#attributes=obj:<name>`); otherwise every single-channel numeric or
+ * dictionary-coded column of level 0, when there are at most a few. The
+ * group index comes first, where the store has groups.
+ */
+export async function chooseShaderObjectValues(
+  access: ZarrVectorsStoreAccess,
+  levelPath: string,
+  requested: readonly string[] | undefined,
+  budget: number,
+  warnings: string[],
+  signal?: AbortSignal,
+): Promise<ShaderObjectValue[]> {
+  const out: ShaderObjectValue[] = [];
+  const groups = await openReader(access, `${levelPath}/groups`, signal);
+  if (groups !== undefined) out.push({ column: undefined });
+  let names: string[];
+  if (requested !== undefined) {
+    names = [...requested];
+  } else {
+    try {
+      names = (
+        await access.listDirectories(`${levelPath}/object_attributes`, signal)
+      ).sort();
+    } catch {
+      names = [];
+    }
+  }
+  const eligible: ShaderObjectValue[] = [];
+  const refused: string[] = [];
+  await mapConcurrent(names, 8, async (name) => {
+    if (name === "segment_id") return;
+    const reader = await openReader(
+      access,
+      `${levelPath}/object_attributes/${name}`,
+      signal,
+    ).catch(() => undefined);
+    const array = reader?.array;
+    const type = array?.elementType;
+    const ok =
+      array !== undefined &&
+      array.stringEncoding === undefined &&
+      type !== "vlen" &&
+      type !== "utf32" &&
+      array.shape.length === 1 &&
+      // 64-bit integers are ids, not quantities, unless asked for.
+      (requested !== undefined || (type !== "int64" && type !== "uint64"));
+    if (!ok) {
+      if (requested !== undefined) refused.push(name);
+      return;
+    }
+    if (type === "int64" || type === "uint64") {
+      warnings.push(
+        `object attribute ${name} is ${type}, read in shaders as float32: ` +
+          "values beyond 16,777,216 (such as segment ids) lose precision",
+      );
+    }
+    const categories = array.attributes?.categories;
+    eligible.push({
+      column: name,
+      categories:
+        array.attributes?.encoding === "dictionary" && Array.isArray(categories)
+          ? categories.map(categoryText)
+          : undefined,
+    });
+  });
+  if (refused.length > 0) {
+    warnings.push(
+      `object attributes ${refused.join(", ")} cannot reach shaders ` +
+        "(not one number per object)",
+    );
+  }
+  eligible.sort((a, b) => (a.column! < b.column! ? -1 : 1));
+  let chosen = eligible;
+  if (requested === undefined && eligible.length > DEFAULT_SHADER_COLUMNS) {
+    warnings.push(
+      `${eligible.length} object attributes could reach shaders as obj_<name>; ` +
+        "none do by default. Name them with #attributes=obj:a,obj:b",
+    );
+    chosen = [];
+  }
+  const room = Math.max(0, budget - out.length);
+  if (chosen.length > room) {
+    warnings.push(
+      `only ${room} object attribute(s) fit in the shader alongside the ` +
+        `vertex attributes; left out: ${chosen
+          .slice(room)
+          .map((c) => c.column)
+          .join(", ")}`,
+    );
+    chosen = chosen.slice(0, room);
+  }
+  if (out.length > budget) out.length = 0;
+  return [...out, ...chosen];
+}
+
+/** Per-object values for shaders, and the row of an object id. */
+export interface ShaderObjectValues {
+  rowOf(id: bigint): number | undefined;
+  /** One array per requested value, one float per row; NaN where unknown. */
+  values: Float32Array[];
+}
+
+const shaderValueCache = new WeakMap<
+  ZarrVectorsStoreAccess,
+  Map<string, Promise<ShaderObjectValues | undefined>>
+>();
+
+/**
+ * Reads the object values `wanted` for every object of `levelPath` (level
+ * 0): numbers as float32, dictionary codes as their code, missing values
+ * (the column's absent sentinel) as NaN, and each object's first group
+ * index. Cached per store.
+ */
+export function readShaderObjectValues(
+  access: ZarrVectorsStoreAccess,
+  levelPath: string,
+  wanted: readonly ShaderObjectValue[],
+): Promise<ShaderObjectValues | undefined> {
+  let cache = shaderValueCache.get(access);
+  if (cache === undefined) shaderValueCache.set(access, (cache = new Map()));
+  const key = `${levelPath}|${wanted.map((w) => w.column ?? "#group").join(",")}`;
+  let promise = cache.get(key);
+  if (promise === undefined) {
+    promise = loadShaderObjectValues(access, levelPath, wanted);
+    cache.set(key, promise);
+    promise.catch(() => cache!.delete(key));
+  }
+  return promise;
+}
+
+async function loadShaderObjectValues(
+  access: ZarrVectorsStoreAccess,
+  levelPath: string,
+  wanted: readonly ShaderObjectValue[],
+): Promise<ShaderObjectValues | undefined> {
+  const table = await readObjectTable(access, levelPath);
+  if (table === undefined) return undefined;
+  const n = table.numObjects;
+  const index = new SegmentIdIndex(table.segmentIds);
+  const values = await Promise.all(
+    wanted.map(async ({ column }) => {
+      const out = new Float32Array(n).fill(NaN);
+      try {
+        if (column === undefined) {
+          const tags = await readGroupTags(access, levelPath, table, []);
+          // Later groups first, so each row ends with its first group.
+          for (let g = tags.length - 1; g >= 0; --g) {
+            const { rows } = tags[g];
+            for (let i = 0; i < rows.length; ++i) out[rows[i]] = g;
+          }
+          return out;
+        }
+        const reader = await openReader(
+          access,
+          `${levelPath}/object_attributes/${column}`,
+        );
+        if (reader === undefined) return out;
+        const { array } = reader;
+        const rows = Math.min(n, array.shape[0]);
+        const type = array.elementType as ElementType;
+        const bytes = await reader.readRows(0, rows);
+        const numbers = decodeNumbers(bytes, type, rows);
+        const attrs = array.attributes ?? {};
+        const absent =
+          attrs.fill_sentinel_meaning === "absent"
+            ? decodeNumbers(fillBytes(array), type, 1)[0]
+            : undefined;
+        const fillCode =
+          attrs.encoding === "dictionary" ? Number(attrs._FillValue) : NaN;
+        for (let r = 0; r < rows; ++r) {
+          const v = numbers[r];
+          out[r] = v === absent || v === fillCode ? NaN : v;
+        }
+      } catch (e) {
+        warnOnce(
+          `object values for shaders: ${column ?? "groups"} unreadable ` +
+            `(${e instanceof Error ? e.message : e})`,
+        );
+      }
+      return out;
+    }),
+  );
+  return { rowOf: (id) => index.rowOf(id), values };
+}

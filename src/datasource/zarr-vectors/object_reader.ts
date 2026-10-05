@@ -29,6 +29,7 @@ import {
   edgeTangents,
   forEachFragmentVertex,
 } from "#src/datasource/zarr-vectors/chunk_decode.js";
+import { fillObjectValues } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
 import type { ElementType } from "#src/datasource/zarr-vectors/dtype.js";
 import {
   decodeFloat32,
@@ -435,6 +436,15 @@ export class ObjectReader {
         );
       });
     });
+    // Object values are the object's own, on every vertex.
+    if (n > 0 && description.objectValuesPath !== undefined) {
+      const ids = new Uint32Array(2 * n);
+      for (let v = 0; v < n; ++v) {
+        ids[2 * v] = Number(segmentId & 0xffffffffn);
+        ids[2 * v + 1] = Number(segmentId >> 32n);
+      }
+      await fillObjectValues(this.access, description, attributes, ids, n);
+    }
     const edgeArray = Uint32Array.from(edges);
     if (KIND_CAPABILITIES[description.geometryKind].tangent !== undefined) {
       attributes.push(edgeTangents(positions, edgeArray));

@@ -33,6 +33,7 @@ import {
   ObjectReader,
 } from "#src/datasource/zarr-vectors/object_reader.js";
 import {
+  chooseShaderObjectValues,
   readObjectTable,
   readSegmentProperties,
 } from "#src/datasource/zarr-vectors/objects.js";
@@ -725,5 +726,102 @@ describe("which object a fragment belongs to", () => {
     const coarse = await decodeLevel(1);
     expect(coarse.numVertices).toBeGreaterThan(0);
     expect(coarse.attributes[0].every((x) => Number.isNaN(x))).toBe(true);
+  });
+});
+
+describe("object values in shaders", () => {
+  /** poly_raw with its object values added, as the frontend adds them. */
+  async function withObjectValues() {
+    const store = await open("poly_raw");
+    const warnings: string[] = [];
+    const chosen = await chooseShaderObjectValues(
+      access("poly_raw"),
+      "0",
+      undefined,
+      12 - store.description.attributes.length,
+      warnings,
+    );
+    const description = {
+      ...store.description,
+      objectValuesPath: "0",
+      attributes: [
+        ...store.description.attributes,
+        ...chosen.map((c) => ({
+          name: c.column ?? "group",
+          id: `obj_${c.column ?? "group"}`,
+          dtype: "float32" as const,
+          components: 1,
+          objectValue: { column: c.column },
+        })),
+      ],
+    };
+    return { store, description, chosen, warnings };
+  }
+
+  it("offers each object's group and its numeric attributes", async () => {
+    const { chosen, warnings } = await withObjectValues();
+    expect(chosen.map((c) => c.column ?? "#group")).toEqual([
+      "#group",
+      "kind",
+      "length",
+    ]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("puts the object's values on every vertex, in both layers", async () => {
+    const { store, description } = await withObjectValues();
+    const slot = (id: string) =>
+      description.attributes.findIndex((a) => a.id === id);
+    const want = (row: number) => ({
+      group: row < 3 ? 0 : 1,
+      kind: expected.object_attributes.kind[row],
+      length: expected.object_attributes.length[row],
+    });
+    // Objects: the skeleton of each object carries its own values.
+    const reader = new ObjectReader(
+      access("poly_raw"),
+      description,
+      store.levels[0],
+    );
+    for (let row = 0; row < 6; ++row) {
+      const skeleton = await reader.readSkeleton(BigInt(row), signal);
+      const w = want(row);
+      for (const [id, value] of Object.entries(w)) {
+        const values = skeleton.attributes[slot(`obj_${id}`)];
+        expect(values.length).toBeGreaterThan(0);
+        expect(
+          values.every((x) => x === value),
+          `${id} of ${row}`,
+        ).toBe(true);
+      }
+    }
+    // Dense: every own vertex carries its object's values.
+    const pipeline = new LevelPipeline(
+      access("poly_raw"),
+      description,
+      store.levels[0],
+    );
+    const { shape } = store.levels[0].arrays.vertices;
+    const origin = store.levels[0].arrays.vertices.attributes.chunk_grid_origin;
+    let checked = 0;
+    for (let i = 0; i < shape[0]; ++i) {
+      for (let j = 0; j < shape[1]; ++j) {
+        for (let k = 0; k < shape[2]; ++k) {
+          const chunk = await pipeline.download(
+            [i + origin[0], j + origin[1], k + origin[2]],
+            signal,
+          );
+          if (chunk === undefined) continue;
+          for (let v = 0; v < chunk.numOwnVertices; ++v) {
+            const w = want(chunk.segmentIds[2 * v]);
+            expect(chunk.attributes[slot("obj_kind")][v]).toBe(w.kind);
+            expect(chunk.attributes[slot("obj_length")][v]).toBe(w.length);
+            expect(chunk.attributes[slot("obj_group")][v]).toBe(w.group);
+            ++checked;
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
   });
 });
