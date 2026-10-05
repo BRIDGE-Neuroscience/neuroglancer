@@ -1,0 +1,51 @@
+{
+  "shape": [
+    3,
+    3,
+    3
+  ],
+  "data_type": "variable_length_bytes",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        1,
+        1,
+        1
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": "",
+  "codecs": [
+    {
+      "name": "vlen-bytes",
+      "configuration": {}
+    }
+  ],
+  "attributes": {
+    "nonempty_chunks": [
+      "1.1.0"
+    ],
+    "zv_array": "links",
+    "dtype": "int64",
+    "offsets": [
+      [
+        0,
+        -1,
+        1
+      ]
+    ],
+    "has_perm": false,
+    "link_width": 2,
+    "level_delta": 1
+  },
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

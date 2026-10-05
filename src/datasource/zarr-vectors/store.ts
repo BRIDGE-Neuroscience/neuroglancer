@@ -23,6 +23,7 @@
 import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/base.js";
 import type { ElementType } from "#src/datasource/zarr-vectors/dtype.js";
 import {
+  attributeDtype,
   ELEMENT_BYTES,
   isElementType,
 } from "#src/datasource/zarr-vectors/dtype.js";
@@ -97,6 +98,11 @@ export interface ZarrVectorsLevel {
    * `vertexCount` counts the level's own vertices either way.
    */
   refinement: "replace" | "add";
+  /**
+   * The level's chunk keys lead with an attribute bin (`chunk_dims` of four
+   * axes, or `chunk_attribute_values`): its cells are not spatial alone.
+   */
+  attributeChunked: boolean;
   arrays: ZarrVectorsLevelArrays;
 }
 
@@ -337,14 +343,15 @@ const GLSL_UNSAFE = new Set(
     "const float int uint bool vec2 vec3 vec4 mat2 mat3 mat4 void if else for " +
     "while do return break continue discard true false highp mediump lowp " +
     "precision struct switch case default layout flat smooth centroid " +
-    "sampler2D segment tangent position color main"
+    "sampler2D segment tangent position color main selectedNodeAttr"
   ).split(" "),
 );
 
 /** A GLSL-safe identifier for an attribute name, unique within `used`. */
 export function safeAttributeId(name: string, used: Set<string>): string {
-  let base = name.replace(/[^a-zA-Z0-9_]/g, "_").replace(/__+/g, "_");
+  let base = name.replace(/[^a-zA-Z0-9_]/g, "_");
   if (!/^[a-z]/.test(base)) base = `a_${base}`;
+  base = base.replace(/__+/g, "_");
   if (GLSL_UNSAFE.has(base) || base.startsWith("gl_")) base = `attr_${base}`;
   let id = base;
   for (let i = 2; used.has(id); ++i) id = `${base}_${i}`;
@@ -413,6 +420,11 @@ async function attributeWidth(
   if (Array.isArray(rowShape) && rowShape.length > 0) {
     return rowShape.reduce((a: number, b: number) => a * Number(b), 1);
   }
+  // zarr-vectors-py's own order: row_shape, then the channel names.
+  const channelNames = json.attributes?.channel_names;
+  if (Array.isArray(channelNames) && channelNames.length > 0) {
+    return channelNames.length;
+  }
   const found = await sample();
   if (found === undefined) return 1;
   const reader = new ZarrArrayReader(
@@ -422,7 +434,7 @@ async function attributeWidth(
   );
   const bytes = await reader.readCell(found.cell);
   if (bytes === undefined) return 1;
-  const dtype = (json.attributes?.dtype ?? json.data_type) as ElementType;
+  const dtype = attributeDtype(json) as ElementType;
   const width = bytes.byteLength / (found.vertices * ELEMENT_BYTES[dtype]);
   return Number.isInteger(width) && width >= 1 ? width : 1;
 }
@@ -434,19 +446,24 @@ async function selectAttributes(
   verticesJson: any,
   zv: any,
   selected: readonly string[] | undefined,
+  synthesisesTangent: boolean,
   warnings: string[],
   signal?: AbortSignal,
 ): Promise<{ attributes: ZarrVectorsAttribute[]; json: any[] }> {
   let names: string[];
+  // Declared in the root's attribute_specs but perhaps not written yet:
+  // dropped quietly if absent, unlike a listed or chosen name.
+  let declaredOnly = new Set<string>();
   if (selected !== undefined) {
-    if (selected.length > MAX_ATTRIBUTES) {
+    names = [...new Set(selected)];
+    if (names.length > MAX_ATTRIBUTES) {
       throw new Error(
         `#attributes names more than ${MAX_ATTRIBUTES} attributes`,
       );
     }
-    names = [...selected];
   } else {
-    const found = new Set(Object.keys(zv?.attribute_specs?.vertex ?? {}));
+    const declared = new Set(Object.keys(zv?.attribute_specs?.vertex ?? {}));
+    const found = new Set<string>();
     const group = await readJson(
       access.read,
       `${levelPath}/vertex_attributes/zarr.json`,
@@ -467,8 +484,12 @@ async function selectAttributes(
         );
       }
     }
-    // The renderer synthesises `tangent`; a stored one would shadow it.
-    found.delete("tangent");
+    for (const name of declared) {
+      if (!found.has(name)) declaredOnly.add(name);
+      found.add(name);
+    }
+    // Where the renderer synthesises `tangent`, a stored one would shadow it.
+    if (synthesisesTangent) found.delete("tangent");
     names = [...found].sort();
     if (names.length > DEFAULT_ATTRIBUTE_LIMIT) {
       // A gene panel would fetch that many cells per chunk; let the user choose.
@@ -477,6 +498,7 @@ async function selectAttributes(
           `Append #attributes=a,b,c to the source URL (up to ${MAX_ATTRIBUTES})`,
       );
       names = [];
+      declaredOnly = new Set();
     }
   }
   const sample = vertexSample(access, `${levelPath}/vertices`, verticesJson);
@@ -489,8 +511,11 @@ async function selectAttributes(
     const path = `${levelPath}/vertex_attributes/${name}`;
     try {
       const json = await readArrayJson(access.read, path, signal);
-      if (json === undefined) throw new Error("missing");
-      const dtype = json.attributes?.dtype ?? json.data_type;
+      if (json === undefined) {
+        if (declaredOnly.has(name)) return;
+        throw new Error("missing");
+      }
+      const dtype = attributeDtype(json);
       if (!isElementType(dtype)) throw new Error(`dtype ${dtype}`);
       const components = await attributeWidth(access, path, json, sample);
       if (components > 4) {
@@ -517,7 +542,7 @@ async function selectAttributes(
       };
     }
   });
-  const problems = results.flatMap((r) => (r.problem ? [r.problem] : []));
+  const problems = results.flatMap((r) => (r?.problem ? [r.problem] : []));
   if (problems.length > 0) {
     if (selected !== undefined) {
       throw new Error(
@@ -526,7 +551,18 @@ async function selectAttributes(
     }
     warnings.push(`skipped vertex attributes: ${problems.join(", ")}`);
   }
-  const kept = results.filter((r) => r.attribute !== undefined);
+  const kept = results.filter((r) => r?.attribute !== undefined);
+  const wide = kept
+    .filter(
+      (r) => r.attribute!.dtype === "int64" || r.attribute!.dtype === "uint64",
+    )
+    .map((r) => r.attribute!.name);
+  if (wide.length > 0) {
+    warnings.push(
+      `vertex attribute(s) ${wide.join(", ")} are 64-bit integers, drawn as ` +
+        "float32: values beyond 16,777,216 (such as segment ids) lose precision",
+    );
+  }
   const used = new Set<string>();
   for (const r of kept)
     r.attribute!.id = safeAttributeId(r.attribute!.name, used);
@@ -619,6 +655,9 @@ async function readLevel(
     vertexCount: Number.isFinite(vertexCount) ? vertexCount : undefined,
     fragmentLinkGroups: meta.fragment_link_groups === true,
     refinement: meta.refinement === "add" ? "add" : "replace",
+    attributeChunked:
+      (Array.isArray(meta.chunk_dims) && meta.chunk_dims.length > 3) ||
+      Array.isArray(meta.chunk_attribute_values),
     arrays: {
       vertices,
       vertexFragments,
@@ -717,6 +756,7 @@ export async function openZarrVectorsStore(
     level0Vertices,
     zv,
     selectedAttributes,
+    KIND_CAPABILITIES[kind].tangent !== undefined,
     warnings,
     signal,
   );
@@ -736,6 +776,13 @@ export async function openZarrVectorsStore(
     ),
   );
   const levels = allLevels.filter((level) => {
+    if (level.attributeChunked) {
+      warnings.push(
+        `${level.path} is chunked by attribute value as well as space ` +
+          "(chunk_attribute_values), which this viewer cannot read yet",
+      );
+      return false;
+    }
     if (level.arrays.vertices.attributes?.encoding !== "draco") return true;
     warnings.push(
       `${level.path} stores Draco-encoded vertices, which this viewer ` +

@@ -114,18 +114,18 @@ feature per store (and, where it can vary, per chunk), uses it when present,
 and otherwise does what the right-hand column says. Most features change only
 cost; an object index and directory listing also change what can be shown.
 
-| Feature                                                   | Gives                                                                      | Without it                                                  |
-| --------------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `object_index` (`vlen_manifests_v1`/`v2`)                 | `objects` / `meshes` / `properties` subsources                             | dense overview only                                         |
-| more pyramid levels                                       | dense overview level choice (`dense_lod.ts`)                               | level 0 everywhere                                          |
-| mesh levels whose chunks double and that store faces      | multi-resolution meshes (`mesh_lod.ts`)                                    | meshes at level 0                                           |
-| level stamped `fragment_link_groups`                      | one object's faces read alone, by byte range                               | whole face cells (`zvtools index-faces` stamps it)          |
-| uncompressed cells, one per stored chunk (sharded or not) | byte-range reads of rows (bridges, faces, neighbours)                      | whole cells                                                 |
-| `sharding_indexed`                                        | ranges of one shard read together are merged                               | one request per cell                                        |
-| server directory listing                                  | cross-chunk links found by listing `links/0/`                              | edges: the 26 neighbours are probed; faces: missing, warned |
-| `nonempty_chunks`                                         | empty cells skipped without a request                                      | a request that finds nothing                                |
-| zarr-vectors-tools `skeleton_layout`                      | skeleton layout known                                                      | inferred                                                    |
-| `fragment_attributes/segment_id`                          | segment ids read directly (a dense row is mapped through the object table) | taken from the level's manifests                            |
+| Feature                                                   | Gives                                                 | Without it                                                                                                            |
+| --------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `object_index` (`vlen_manifests_v1`/`v2`)                 | `objects` / `meshes` / `properties` subsources        | dense overview only                                                                                                   |
+| more pyramid levels                                       | dense overview level choice (`dense_lod.ts`)          | level 0 everywhere                                                                                                    |
+| mesh levels whose chunks double and that store faces      | multi-resolution meshes (`mesh_lod.ts`)               | meshes at level 0                                                                                                     |
+| level stamped `fragment_link_groups`                      | one object's faces read alone, by byte range          | whole face cells (`zvtools index-faces` stamps it)                                                                    |
+| uncompressed cells, one per stored chunk (sharded or not) | byte-range reads of rows (bridges, faces, neighbours) | whole cells                                                                                                           |
+| `sharding_indexed`                                        | ranges of one shard read together are merged          | one request per cell                                                                                                  |
+| server directory listing                                  | cross-chunk links found by listing `links/0/`         | edges: the 26 neighbours are probed; faces: missing, warned                                                           |
+| `nonempty_chunks`                                         | empty cells skipped without a request                 | a request that finds nothing                                                                                          |
+| zarr-vectors-tools `skeleton_layout`                      | skeleton layout known                                 | inferred                                                                                                              |
+| `fragment_attributes/object_id`, or ids that are rows     | each fragment's object read directly                  | taken from the level's manifests (a `segment_id` column may hold ids or rows, so it is used only where the two agree) |
 
 A feature is trusted only where the data bears it out: a stamped face group
 whose rows index another fragment, or whose count does not match the
@@ -145,8 +145,12 @@ Read through each array's own `zarr.json` (`zarr_array.ts`):
   sends more is handled: only the asked-for bytes are kept.
 - `chunk_grid_origin` (negative chunk coordinates), `nonempty_chunks`.
 - Positions in any float or integer dtype; vertex attributes of any numeric
-  dtype with 1-4 components (the width is measured when `row_shape` is
-  missing); dictionary-encoded attributes.
+  dtype with 1-4 components (from `row_shape`, else `channel_names`, else
+  measured), each level read with its own dtype; dictionary-encoded
+  attributes (as codes). Attributes are float32 in the shader: 64-bit
+  integers beyond 2^24 lose precision (warned). An attribute a level does
+  not store reads as NaN there (warned), not 0. The shader names each
+  attribute both `name` and `prop_name()`.
 - Object index layouts `vlen_manifests_v1` and `vlen_manifests_v2`
   (`object_ids`), any number of chunks; `object_attributes/segment_id` as the
   segment id; overlapping groups.
@@ -191,7 +195,8 @@ Not read yet (reported once in the console):
   vertices when it writes Draco, so its cross-chunk faces would be wrong.
 - 0.9.4 dense manifests (`dense_manifests` capability): the store opens, but
   without `objects` / `meshes` / `properties`.
-- Attribute-chunked levels (`chunk_attribute_values`).
+- Attribute-chunked levels (`chunk_attribute_values`): the level is skipped.
+- Link attributes (per-edge or per-face values).
 - Rank other than 3.
 
 ## Tests

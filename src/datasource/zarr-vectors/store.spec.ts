@@ -21,8 +21,13 @@
  */
 
 import { describe, expect, it } from "vitest";
+import {
+  decodeChunk,
+  forEachFragmentVertex,
+} from "#src/datasource/zarr-vectors/chunk_decode.js";
 import { LevelPipeline } from "#src/datasource/zarr-vectors/chunk_pipeline.js";
 import { levelDensities } from "#src/datasource/zarr-vectors/dense_lod.js";
+import { LevelCells } from "#src/datasource/zarr-vectors/level_cells.js";
 import {
   mergeSkeletons,
   ObjectReader,
@@ -624,5 +629,101 @@ describe("additive pyramids", () => {
       expect(got.own, `level ${index}`).toBe(want.own);
       expect(got.edges, `level ${index}`).toEqual(want.edges);
     }
+  });
+});
+
+describe("which object a fragment belongs to", () => {
+  /** Every fragment's segment id in the dense view, against the manifests. */
+  async function compare(name: string, index: number) {
+    const store = await open(name);
+    const level = store.levels[index];
+    const table = (await readObjectTable(access(name), level.path))!;
+    const reader = new ObjectReader(access(name), store.description, level);
+    const truth = new Map<string, bigint>();
+    for (const id of table.segmentIds) {
+      for (const block of await reader.manifest(id)) {
+        const key = block.chunkCoords.join(".");
+        const ref = block.fragmentRef as any;
+        const fragments =
+          ref.mode === "single"
+            ? [ref.fragmentIndex]
+            : ref.mode === "range"
+              ? Array.from({ length: ref.count }, (_, i) => ref.start + i)
+              : Array.from(ref.indices as number[]);
+        for (const f of fragments) truth.set(`${key}:${f}`, id);
+      }
+    }
+    const pipeline = new LevelPipeline(access(name), store.description, level);
+    const cells = LevelCells.forLevel(access(name), level, store.description);
+    const { shape } = level.arrays.vertices;
+    let checked = 0;
+    let wrong = 0;
+    for (let i = 0; i < shape[0]; ++i) {
+      for (let j = 0; j < shape[1]; ++j) {
+        for (let k = 0; k < shape[2]; ++k) {
+          const key = `${i}.${j}.${k}`;
+          const chunk = await pipeline.download([i, j, k], signal);
+          if (chunk === undefined) continue;
+          const decoded = (await decodeChunk(
+            cells,
+            store.description,
+            key,
+            signal,
+            { skipSegmentIds: true },
+          ))!;
+          for (let f = 0; f < decoded.fragments.numFragments; ++f) {
+            const want = truth.get(`${key}:${f}`);
+            forEachFragmentVertex(decoded.fragments, f, (v) => {
+              const got =
+                BigInt(chunk.segmentIds[2 * v]) |
+                (BigInt(chunk.segmentIds[2 * v + 1]) << 32n);
+              ++checked;
+              if (got !== want) ++wrong;
+            });
+          }
+        }
+      }
+    }
+    return { checked, wrong };
+  }
+
+  it("never takes a stored row for another object's id", async () => {
+    // Ids 1..12; zarr-vectors-tools' pyramid wrote rows 0..11 per fragment.
+    for (const index of [0, 1]) {
+      const { checked, wrong } = await compare("ids_collide", index);
+      expect(checked, `level ${index}`).toBeGreaterThan(0);
+      expect(wrong, `level ${index}`).toBe(0);
+    }
+  });
+
+  it("reads a per-fragment id column of any integer type", async () => {
+    const { checked, wrong } = await compare("ids_int32", 0);
+    expect(checked).toBeGreaterThan(0);
+    expect(wrong).toBe(0);
+  });
+
+  it("leaves an attribute a level does not store unknown, not zero", async () => {
+    const store = await open("attrs_coarse");
+    expect(store.description.attributes.map((a) => a.name)).toEqual(["radius"]);
+    const decodeLevel = async (index: number) => {
+      const level = store.levels[index];
+      const cells = LevelCells.forLevel(
+        access("attrs_coarse"),
+        level,
+        store.description,
+      );
+      const key = [...level.arrays.vertices.attributes.nonempty_chunks][0];
+      return (await decodeChunk(
+        cells,
+        store.description,
+        String(key),
+        signal,
+      ))!;
+    };
+    const fine = await decodeLevel(0);
+    expect(fine.attributes[0].every((x) => x >= 2 && x <= 13)).toBe(true);
+    const coarse = await decodeLevel(1);
+    expect(coarse.numVertices).toBeGreaterThan(0);
+    expect(coarse.attributes[0].every((x) => Number.isNaN(x))).toBe(true);
   });
 });

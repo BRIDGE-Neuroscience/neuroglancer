@@ -186,3 +186,17 @@ export function decodeIndices(
   }
   return out;
 }
+
+/**
+ * An attribute array's element type: zarr-vectors' `dtype` stamp, else the
+ * zarr data type, else float32 for a byte array with no stamp (as
+ * zarr-vectors-py reads it).
+ */
+export function attributeDtype(json: any): string {
+  const stamped = json?.attributes?.dtype;
+  if (stamped !== undefined) return String(stamped);
+  const dataType = json?.data_type;
+  return typeof dataType === "string" && isElementType(dataType)
+    ? dataType
+    : "float32";
+}

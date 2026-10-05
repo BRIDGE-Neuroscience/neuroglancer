@@ -29,15 +29,19 @@
 import type { ZarrVectorsGeometryDescription } from "#src/datasource/zarr-vectors/base.js";
 import type { ElementType } from "#src/datasource/zarr-vectors/dtype.js";
 import {
+  attributeDtype,
   decodeFloat32,
   decodeIndices,
+  decodeUint64,
   ELEMENT_BYTES,
+  isElementType,
 } from "#src/datasource/zarr-vectors/dtype.js";
 import type { FragmentIndex } from "#src/datasource/zarr-vectors/fragment_index.js";
 import { decodeFragments } from "#src/datasource/zarr-vectors/fragment_index.js";
 import { KIND_CAPABILITIES } from "#src/datasource/zarr-vectors/geometry_kind.js";
 import type { LevelCells } from "#src/datasource/zarr-vectors/level_cells.js";
 import { intraLinksPath } from "#src/datasource/zarr-vectors/links.js";
+import { warnOnce } from "#src/datasource/zarr-vectors/util.js";
 
 export interface DecodedChunk {
   numVertices: number;
@@ -53,12 +57,16 @@ export interface DecodedChunk {
   /** One array per exposed attribute, `components` values per vertex. */
   attributes: Float32Array[];
   /**
-   * Segment id per vertex (two uint32, low word first), when it is known
-   * from the chunk itself: a stored per-fragment `segment_id`, or, in a
-   * store without objects, a synthesised id per point (or per fragment).
-   * Otherwise the caller maps fragments to objects through the manifests.
+   * Segment id per vertex (two uint32, low word first) in a store without
+   * objects: a synthesised id per point (or per fragment).
    */
   segmentIds: Uint32Array | undefined;
+  /**
+   * A per-fragment id column (`DecodeChunkOptions.fragmentIdColumn`), one
+   * value per fragment; `undefined` where the chunk has none or a short
+   * one. What the values mean is the caller's to decide.
+   */
+  fragmentIds: BigUint64Array | undefined;
 }
 
 /** Calls `fn` with each vertex of fragment `f`, in walk order. */
@@ -231,8 +239,13 @@ export interface DecodeChunkOptions {
    * May still be loading: it is needed only once the cells are read.
    */
   relinkedChildren?: ReadonlySet<number> | Promise<ReadonlySet<number>>;
-  /** Skip `fragment_attributes/segment_id` (per-object reads know the object). */
+  /** Skip the per-fragment id column (per-object reads know the object). */
   skipSegmentIds?: boolean;
+  /**
+   * Which per-fragment id column to read: `fragment_attributes/segment_id`
+   * (the default) or `fragment_attributes/object_id` (always a dense row).
+   */
+  fragmentIdColumn?: "segment_id" | "object_id";
   /** Skip a mesh's faces (the dense overview draws its vertices only). */
   skipFaces?: boolean;
   /** Skip per-vertex tangents (a caller that assembles objects makes its own). */
@@ -268,9 +281,11 @@ export async function decodeChunk(
     attributes: options.skipAttributes
       ? Promise.resolve([])
       : Promise.all(attributes.map((a) => read(`vertex_attributes/${a.name}`))),
-    segmentIds:
+    fragmentIds:
       description.hasObjects && !options.skipSegmentIds
-        ? read("fragment_attributes/segment_id")
+        ? read(
+            `fragment_attributes/${options.fragmentIdColumn ?? "segment_id"}`,
+          )
         : undefined,
   };
   for (const p of Object.values(reads)) p?.catch(() => {});
@@ -332,39 +347,63 @@ export async function decodeChunk(
         : undefined;
 
   const attributeBytes = await reads.attributes;
-  const decodedAttributes = (options.skipAttributes ? [] : attributes).map(
-    (a, i) => {
+  const decodedAttributes = await Promise.all(
+    (options.skipAttributes ? [] : attributes).map(async (a, i) => {
       const bytes = attributeBytes[i];
       const count = numVertices * a.components;
-      // Coarse levels may lack an attribute the finest level has.
-      return bytes === undefined
-        ? new Float32Array(count)
-        : decodeFloat32(bytes, a.dtype as ElementType, count);
-    },
+      const path = `vertex_attributes/${a.name}`;
+      if (bytes === undefined) {
+        // Not stored here: unknown, not zero (0 can be a real value or code).
+        if ((await cells.reader(path)) === undefined) {
+          warnOnce(
+            `${cells.levelPath} has no vertex attribute ${a.name}; it reads ` +
+              "as NaN there",
+          );
+        }
+        return new Float32Array(count).fill(NaN);
+      }
+      // Each level's own element type; a level may store it differently.
+      const json = (await cells.reader(path))?.array.attributes;
+      const type = (json ? attributeDtype({ attributes: json }) : a.dtype) as
+        | ElementType
+        | string;
+      const width = isElementType(type)
+        ? bytes.byteLength / (numVertices * ELEMENT_BYTES[type])
+        : NaN;
+      if (width !== a.components) {
+        warnOnce(
+          `${cells.levelPath}/${path} stores ${type} x${width} per vertex, ` +
+            `not x${a.components}; it reads as NaN there`,
+        );
+        return new Float32Array(count).fill(NaN);
+      }
+      return decodeFloat32(bytes, type as ElementType, count);
+    }),
   );
 
   let segmentIds: Uint32Array | undefined;
-  const segmentBytes = await reads.segmentIds;
-  if (segmentBytes !== undefined) {
-    const ids = new Uint32Array(numVertices * 2);
-    const view = new DataView(
-      segmentBytes.buffer,
-      segmentBytes.byteOffset,
-      segmentBytes.byteLength,
-    );
-    for (
-      let f = 0;
-      f < fragments.numFragments && 8 * f + 8 <= segmentBytes.byteLength;
-      ++f
-    ) {
-      const lo = view.getUint32(8 * f, true);
-      const hi = view.getUint32(8 * f + 4, true);
-      forEachFragmentVertex(fragments, f, (v) => {
-        ids[2 * v] = lo;
-        ids[2 * v + 1] = hi;
-      });
+  let fragmentIds: BigUint64Array | undefined;
+  const idBytes = await reads.fragmentIds;
+  if (idBytes !== undefined) {
+    const column = `fragment_attributes/${options.fragmentIdColumn ?? "segment_id"}`;
+    const json = (await cells.reader(column))?.array.attributes;
+    const type = json?.dtype ?? "uint64";
+    const count = isElementType(type)
+      ? idBytes.byteLength / ELEMENT_BYTES[type]
+      : NaN;
+    // One value per fragment; a short column (an edit added fragments
+    // without extending it) is left to the manifests.
+    if (Number.isInteger(count) && count >= fragments.numFragments) {
+      fragmentIds = decodeUint64(idBytes, type as ElementType, count).subarray(
+        0,
+        fragments.numFragments,
+      );
+    } else {
+      warnOnce(
+        `${cells.levelPath}/${column}: ${chunkKey} does not hold one ` +
+          `${type} per fragment; objects there are found from the manifests`,
+      );
     }
-    segmentIds = ids;
   } else if (!description.hasObjects) {
     // No objects. A point is its own segment, so a pick selects one point; a
     // curve or surface fragment is one, at least within its chunk.
@@ -394,5 +433,6 @@ export async function decodeChunk(
     tangents,
     attributes: decodedAttributes,
     segmentIds,
+    fragmentIds,
   };
 }
