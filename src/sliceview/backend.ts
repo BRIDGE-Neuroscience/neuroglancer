@@ -69,6 +69,30 @@ import {
 export const BASE_PRIORITY = -1e12;
 export const SCALE_PRIORITY_MULTIPLIER = 1e9;
 
+/**
+ * A slice view counts as moving while its view has changed at least twice in
+ * this many milliseconds; once it has not, it has settled.
+ */
+export const MOVEMENT_SETTLE_MS = 300;
+
+/**
+ * Tells a moving view from a settled one by the times of its last two
+ * changes.  One change (a jump to a new position) is not movement.
+ */
+export class MovementTracker {
+  private lastChange = Number.NEGATIVE_INFINITY;
+  private previousChange = Number.NEGATIVE_INFINITY;
+
+  noteChange(now = Date.now()) {
+    this.previousChange = this.lastChange;
+    this.lastChange = now;
+  }
+
+  isMoving(now = Date.now()) {
+    return now - this.previousChange < MOVEMENT_SETTLE_MS;
+  }
+}
+
 // Temporary values used by SliceView.updateVisibleChunk
 const tempChunkPosition = vec3.create();
 const tempCenter = vec3.create();
@@ -103,6 +127,14 @@ const SliceViewIntermediateBase = withSharedVisibility(
 @registerSharedObject(SLICEVIEW_RPC_ID)
 export class SliceViewBackend extends SliceViewIntermediateBase {
   velocityEstimator = new VelocityEstimator();
+  movement = new MovementTracker();
+
+  /**
+   * Set while the finest visible level is left out because the view is
+   * moving: it asks for chunk priorities again once the view settles.
+   */
+  private settleTimer: ReturnType<typeof setTimeout> | undefined;
+
   constructor(rpc: RPC, options: any) {
     super(rpc, options);
     this.registerDisposer(
@@ -112,11 +144,34 @@ export class SliceViewBackend extends SliceViewIntermediateBase {
     );
     this.registerDisposer(
       this.projectionParameters.changed.add(() => {
+        this.movement.noteChange();
         this.velocityEstimator.addSample(
           this.projectionParameters.value.globalPosition,
         );
       }),
     );
+    this.registerDisposer(() => clearTimeout(this.settleTimer));
+  }
+
+  /**
+   * Whether to leave out the finest of the visible levels: while the view
+   * moves, with movement-aware downloads on, the next coarser level (already
+   * asked for, at a higher priority) stands in for it.  Chunks of the finest
+   * level already on the GPU are still drawn.
+   */
+  private skipFinestLevel() {
+    if (
+      !this.chunkManager.queueManager.enableMovementAwareDownloads.value ||
+      !this.movement.isMoving()
+    ) {
+      return false;
+    }
+    clearTimeout(this.settleTimer);
+    this.settleTimer = setTimeout(() => {
+      this.settleTimer = undefined;
+      this.chunkManager.scheduleUpdateChunkPriorities();
+    }, MOVEMENT_SETTLE_MS);
+    return true;
   }
 
   invalidateVisibleChunks() {
@@ -149,11 +204,13 @@ export class SliceViewBackend extends SliceViewIntermediateBase {
     this.velocityEstimator.addSample(
       this.projectionParameters.value.globalPosition,
     );
+    const skipFinest = this.skipFinestLevel();
     for (const [layer, visibleLayerSources] of this.visibleLayers) {
       chunkManager.registerLayer(layer);
       const { visibleSources } = visibleLayerSources;
       for (
-        let i = 0, numVisibleSources = visibleSources.length;
+        let i = skipFinest && visibleSources.length > 1 ? 1 : 0,
+          numVisibleSources = visibleSources.length;
         i < numVisibleSources;
         ++i
       ) {

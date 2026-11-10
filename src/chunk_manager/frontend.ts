@@ -112,6 +112,13 @@ export class ChunkQueueManager extends SharedObject {
 
   enablePrefetch = new TrackableBoolean(true, true);
 
+  /**
+   * Whether downloads adapt to a moving view: slice views ask for one level
+   * coarser while they move, and a download that is mostly done is not
+   * cancelled to make room for another.
+   */
+  enableMovementAwareDownloads = new TrackableBoolean(true, true);
+
   constructor(
     rpc: RPC,
     public gl: GL,
@@ -143,6 +150,12 @@ export class ChunkQueueManager extends SharedObject {
       computeCapacity: makeCapacityCounterparts(capacities.compute),
       enablePrefetch: this.registerDisposer(
         SharedWatchableValue.makeFromExisting(rpc, this.enablePrefetch),
+      ).rpcId,
+      enableMovementAwareDownloads: this.registerDisposer(
+        SharedWatchableValue.makeFromExisting(
+          rpc,
+          this.enableMovementAwareDownloads,
+        ),
       ).rpcId,
     });
   }

@@ -102,6 +102,10 @@ export class ViewerSettingsPanel extends SidePanel {
       "Concurrent chunk requests",
       viewer.chunkQueueManager.capacities.download.itemLimit,
     );
+    addLimitWidget(
+      "Bytes of chunks downloading at once",
+      viewer.chunkQueueManager.capacities.download.sizeLimit,
+    );
 
     const addCheckbox = (
       label: string,
@@ -129,6 +133,10 @@ export class ViewerSettingsPanel extends SidePanel {
     );
     addCheckbox("Wire frame rendering", viewer.wireFrame);
     addCheckbox("Enable prefetching", viewer.chunkQueueManager.enablePrefetch);
+    addCheckbox(
+      "Coarser downloads while moving",
+      viewer.chunkQueueManager.enableMovementAwareDownloads,
+    );
     addCheckbox(
       "Enable adaptive downsampling",
       viewer.enableAdaptiveDownsampling,

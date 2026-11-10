@@ -19,14 +19,13 @@ import {
   SliceViewChunk,
   SliceViewChunkSourceBackend,
 } from "#src/sliceview/backend.js";
-import type {
-  DataType,
-  SliceViewChunkSpecification,
-} from "#src/sliceview/base.js";
+import type { SliceViewChunkSpecification } from "#src/sliceview/base.js";
 import type {
   VolumeChunkSource as VolumeChunkSourceInterface,
   VolumeChunkSpecification,
 } from "#src/sliceview/volume/base.js";
+import type { DataType } from "#src/util/data_type.js";
+import { DATA_TYPE_BYTES } from "#src/util/data_type.js";
 import type { vec3 } from "#src/util/geom.js";
 import * as vector from "#src/util/vector.js";
 import type { RPC } from "#src/worker_rpc.js";
@@ -154,6 +153,17 @@ export class VolumeChunkSource
 
   computeChunkBounds(chunk: VolumeChunk) {
     return computeChunkBounds(this, chunk);
+  }
+
+  /**
+   * The decoded size of a whole chunk: a chunk clipped at the volume's upper
+   * bound is counted as whole, which overestimates only at the edges.
+   */
+  estimateDownloadBytes(_chunk: Chunk) {
+    const { chunkDataSize, dataType } = this.spec;
+    let bytes = DATA_TYPE_BYTES[dataType];
+    for (const size of chunkDataSize) bytes *= size;
+    return bytes;
   }
 }
 VolumeChunkSource.prototype.chunkConstructor = VolumeChunk;

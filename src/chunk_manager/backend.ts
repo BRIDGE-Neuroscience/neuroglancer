@@ -114,6 +114,21 @@ export class Chunk implements Disposable {
   isComputational = false;
 
   /**
+   * Bytes this chunk is expected to hold once downloaded, as its source
+   * estimates them (`ChunkSourceBase.estimateDownloadBytes`).  Charged to the
+   * download capacity's size limit while the chunk is DOWNLOADING, so that a
+   * few large chunks share the link rather than a hundred.  Set only while the
+   * chunk is not DOWNLOADING, so that it is released exactly as charged.
+   */
+  downloadBytes = 0;
+
+  /**
+   * When the current download started (`Date.now()`), for telling a download
+   * that is mostly done from one that has just begun.
+   */
+  downloadStartTime = 0;
+
+  /**
    * Specifies lowest numeric state required by any request, if `prioritTier !==
    * ChunkPriorityTier.RECENT`, then this must be one of `GPU_MEMORY`, `SYSTEM_MEMORY`, or
    * `SYSTEM_MEMORY_WORKER`.
@@ -295,6 +310,15 @@ export class ChunkSourceBase extends SharedObject {
    */
   sourceQueueLevel = 0;
 
+  /**
+   * Bytes the specified chunk is expected to hold once downloaded, charged to
+   * the download capacity's size limit while it downloads.  0, the default,
+   * leaves the chunk limited by the number of downloads alone.
+   */
+  estimateDownloadBytes(_chunk: Chunk): number {
+    return 0;
+  }
+
   constructor(public chunkManager: Borrowed<ChunkManager>) {
     super();
     chunkManager.queueManager.sources.add(this);
@@ -431,7 +455,7 @@ export class ChunkSource extends ChunkSourceBase {
 function startChunkDownload(chunk: Chunk) {
   const downloadAbortController = (chunk.downloadAbortController =
     new AbortController());
-  const startTime = Date.now();
+  const startTime = (chunk.downloadStartTime = Date.now());
   chunk.source!.download(chunk, downloadAbortController.signal).then(
     () => {
       if (chunk.downloadAbortController === downloadAbortController) {
@@ -618,6 +642,100 @@ function tryToFreeCapacity(
   return true;
 }
 
+/**
+ * A download counts as mostly done once it has run for this fraction of its
+ * source's mean download time.
+ */
+export const MOSTLY_DONE_FRACTION = 0.5;
+
+/**
+ * A download that has run for more than this multiple of its source's mean
+ * download time is late rather than nearly done (a stalled request), and may
+ * be cancelled as before.
+ */
+export const LATE_DOWNLOAD_MULTIPLE = 2;
+
+/**
+ * Whether a download is far enough along that cancelling it would waste more
+ * than it frees: it has run for at least `MOSTLY_DONE_FRACTION` of its
+ * source's mean download time, and not yet `LATE_DOWNLOAD_MULTIPLE` times it.
+ * A source with no finished download yet has no mean, so nothing counts as
+ * mostly done.
+ */
+export function isDownloadMostlyDone(
+  elapsedMs: number,
+  meanDownloadMs: number | undefined,
+) {
+  if (meanDownloadMs === undefined || !(meanDownloadMs > 0)) return false;
+  return (
+    elapsedMs >= MOSTLY_DONE_FRACTION * meanDownloadMs &&
+    elapsedMs <= LATE_DOWNLOAD_MULTIPLE * meanDownloadMs
+  );
+}
+
+function meanDownloadMs(source: ChunkSourceBase): number | undefined {
+  const { statistics } = source;
+  const count =
+    statistics[
+      getChunkDownloadStatisticIndex(ChunkDownloadStatistics.totalChunks)
+    ];
+  if (!(count > 0)) return undefined;
+  return (
+    statistics[
+      getChunkDownloadStatisticIndex(ChunkDownloadStatistics.totalTime)
+    ] / count
+  );
+}
+
+/**
+ * Like `tryToFreeCapacity`, for downloads, whose size is the bytes the
+ * candidate is expected to hold.  A candidate larger than the whole limit
+ * still starts once nothing else is downloading, so that no chunk waits for
+ * ever.  If `now` is given, a download that is mostly done
+ * (`isDownloadMostlyDone`) is never cancelled to make room: the candidate
+ * waits for it to finish instead.
+ */
+function tryToFreeDownloadCapacity(
+  size: number,
+  capacity: AvailableCapacity,
+  priorityTier: ChunkPriorityTier,
+  priority: number,
+  evictionCandidates: Iterator<Chunk>,
+  evict: (chunk: Chunk) => void,
+  now: number | undefined,
+) {
+  while (
+    capacity.availableItems < 1 ||
+    (capacity.availableSize < size && capacity.currentItems > 0)
+  ) {
+    const evictionCandidate = evictionCandidates.next().value;
+    if (evictionCandidate === undefined) {
+      return false;
+    }
+    const evictionTier = evictionCandidate.priorityTier;
+    if (
+      evictionTier < priorityTier ||
+      (evictionTier === priorityTier && evictionCandidate.priority >= priority)
+    ) {
+      return false;
+    }
+    if (
+      now !== undefined &&
+      isDownloadMostlyDone(
+        now - evictionCandidate.downloadStartTime,
+        meanDownloadMs(evictionCandidate.source!),
+      )
+    ) {
+      // The candidates come lowest priority first, and an iterator over a
+      // heap yields the same root until it is removed: stop here, and try
+      // again when this download finishes.
+      return false;
+    }
+    evict(evictionCandidate);
+  }
+  return true;
+}
+
 class AvailableCapacity extends RefCounted {
   currentSize = 0;
   currentItems = 0;
@@ -668,6 +786,13 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
   computeCapacity: AvailableCapacity;
 
   enablePrefetch: SharedWatchableValue<boolean>;
+
+  /**
+   * Whether downloads adapt to a moving view: a download that is mostly done
+   * is not cancelled to make room for another, and slice views ask for one
+   * level coarser while they move (`SliceViewBackend`).
+   */
+  enableMovementAwareDownloads: SharedWatchableValue<boolean>;
 
   /**
    * Set of chunk sources associated with this queue manager.
@@ -746,6 +871,9 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
     this.gpuMemoryCapacity = getCapacity(options.gpuMemoryCapacity);
     this.systemMemoryCapacity = getCapacity(options.systemMemoryCapacity);
     this.enablePrefetch = rpc.get(options.enablePrefetch);
+    this.enableMovementAwareDownloads = rpc.get(
+      options.enableMovementAwareDownloads,
+    );
     this.downloadCapacity = [
       getCapacity(options.downloadCapacity),
       getCapacity(options.downloadCapacity),
@@ -807,13 +935,19 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
         break;
 
       case ChunkState.DOWNLOADING:
-        (chunk.isComputational
-          ? this.computeCapacity
-          : this.downloadCapacity[chunk.source!.sourceQueueLevel]
-        ).adjust(
-          factor * chunk.downloadSlots,
-          factor * chunk.systemMemoryBytes,
-        );
+        if (chunk.isComputational) {
+          this.computeCapacity.adjust(
+            factor * chunk.downloadSlots,
+            factor * chunk.systemMemoryBytes,
+          );
+        } else {
+          // Downloads are limited by the bytes expected, which are known
+          // before any arrive, rather than by the bytes held so far.
+          this.downloadCapacity[chunk.source!.sourceQueueLevel].adjust(
+            factor * chunk.downloadSlots,
+            factor * chunk.downloadBytes,
+          );
+        }
         this.systemMemoryCapacity.adjust(
           factor,
           factor * chunk.systemMemoryBytes,
@@ -1021,10 +1155,12 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
       this.updateChunkState(chunk, ChunkState.QUEUED);
     };
 
+    const keepMostlyDone = this.enableMovementAwareDownloads.value;
     const promotionLambda = (
       promotionCandidates: Iterator<Chunk>,
       evictionCandidates: Iterator<Chunk>,
       capacity: AvailableCapacity,
+      isDownload: boolean,
     ) => {
       const systemMemoryEvictionCandidates =
         this.systemMemoryEvictionQueue.candidates();
@@ -1039,15 +1175,28 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
         const priorityTier = promotionCandidate.priorityTier;
         const priority = promotionCandidate.priority;
         // console.log("Download capacity: " + downloadCapacity);
+        const downloadBytes = isDownload
+          ? promotionCandidate.source!.estimateDownloadBytes(promotionCandidate)
+          : 0;
         if (
-          !tryToFreeCapacity(
-            size,
-            capacity,
-            priorityTier,
-            priority,
-            evictionCandidates,
-            evict,
-          )
+          !(isDownload
+            ? tryToFreeDownloadCapacity(
+                downloadBytes,
+                capacity,
+                priorityTier,
+                priority,
+                evictionCandidates,
+                evict,
+                keepMostlyDone ? Date.now() : undefined,
+              )
+            : tryToFreeCapacity(
+                size,
+                capacity,
+                priorityTier,
+                priority,
+                evictionCandidates,
+                evict,
+              ))
         ) {
           return;
         }
@@ -1063,6 +1212,7 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
         ) {
           return;
         }
+        promotionCandidate.downloadBytes = downloadBytes;
         this.updateChunkState(promotionCandidate, ChunkState.DOWNLOADING);
         startChunkDownload(promotionCandidate);
       }
@@ -1077,12 +1227,14 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
         this.queuedDownloadPromotionQueue[sourceQueueLevel].candidates(),
         this.downloadEvictionQueue[sourceQueueLevel].candidates(),
         this.downloadCapacity[sourceQueueLevel],
+        true,
       );
     }
     promotionLambda(
       this.queuedComputePromotionQueue.candidates(),
       this.computeEvictionQueue.candidates(),
       this.computeCapacity,
+      false,
     );
   }
 

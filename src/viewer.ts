@@ -349,6 +349,14 @@ export class TrackableViewerState extends CompoundTrackable {
       "concurrentDownloads",
       viewer.dataContext.chunkQueueManager.capacities.download.itemLimit,
     );
+    this.add(
+      "concurrentDownloadBytes",
+      viewer.dataContext.chunkQueueManager.capacities.download.sizeLimit,
+    );
+    this.add(
+      "movementAwareDownloads",
+      viewer.dataContext.chunkQueueManager.enableMovementAwareDownloads,
+    );
     this.add("selectedLayer", viewer.selectedLayer);
     this.add("crossSectionBackgroundColor", viewer.crossSectionBackgroundColor);
     this.add(

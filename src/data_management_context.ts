@@ -25,6 +25,11 @@ import type { GL } from "#src/webgl/context.js";
 import { getChunkWorkerFactory } from "#src/worker_factories.js";
 import { RPC } from "#src/worker_rpc.js";
 
+/**
+ * Decoded bytes of the chunks downloading at once, by default.
+ */
+export const DEFAULT_DOWNLOAD_SIZE_LIMIT = 64 * 1024 * 1024;
+
 export class DataManagementContext extends RefCounted {
   worker: Worker;
   chunkQueueManager: ChunkQueueManager;
@@ -63,9 +68,13 @@ export class DataManagementContext extends RefCounted {
             defaultItemLimit: 1e7,
             defaultSizeLimit: 2e9,
           }),
+          // Downloads are limited by the decoded bytes of the chunks in
+          // flight as well as by their number: a hundred 64^3 chunks at once,
+          // but only a few 256^3 ones, so that on a slow link the first of
+          // them arrive early instead of all together at the end.
           download: new CapacitySpecification({
             defaultItemLimit: 100,
-            defaultSizeLimit: Number.POSITIVE_INFINITY,
+            defaultSizeLimit: DEFAULT_DOWNLOAD_SIZE_LIMIT,
           }),
           compute: new CapacitySpecification({
             defaultItemLimit: 128,
