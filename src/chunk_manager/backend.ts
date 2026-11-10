@@ -468,6 +468,9 @@ function startChunkDownload(chunk: Chunk) {
         ++statistics[
           getChunkDownloadStatisticIndex(ChunkDownloadStatistics.totalChunks)
         ];
+        if (chunk.downloadBytes > 0) {
+          chunk.queueManager.noteDownloadTime(endTime - startTime);
+        }
         chunk.downloadSucceeded();
       }
     },
@@ -688,8 +691,18 @@ function meanDownloadMs(source: ChunkSourceBase): number | undefined {
 }
 
 /**
+ * Downloads limited by size are expected to take about this long each.  While
+ * they take less (a fast link), the size limit is raised, up to
+ * `MAX_DOWNLOAD_SIZE_SCALE` times the setting; while they take more than twice
+ * this, it is lowered again, never below the setting.
+ */
+export const TARGET_DOWNLOAD_MS = 1500;
+export const MAX_DOWNLOAD_SIZE_SCALE = 8;
+const DOWNLOAD_SIZE_SCALE_STEP = 1.25;
+
+/**
  * Like `tryToFreeCapacity`, for downloads, whose size is the bytes the
- * candidate is expected to hold.  A candidate larger than the whole limit
+ * candidate is expected to hold, against the size limit times `sizeScale`.  A candidate larger than the whole limit
  * still starts once nothing else is downloading, so that no chunk waits for
  * ever.  If `now` is given, a download that is mostly done
  * (`isDownloadMostlyDone`) is never cancelled to make room: the candidate
@@ -703,10 +716,12 @@ function tryToFreeDownloadCapacity(
   evictionCandidates: Iterator<Chunk>,
   evict: (chunk: Chunk) => void,
   now: number | undefined,
+  sizeScale: number,
 ) {
   while (
     capacity.availableItems < 1 ||
-    (capacity.availableSize < size && capacity.currentItems > 0)
+    (capacity.sizeLimit.value * sizeScale - capacity.currentSize < size &&
+      capacity.currentItems > 0)
   ) {
     const evictionCandidate = evictionCandidates.next().value;
     if (evictionCandidate === undefined) {
@@ -854,6 +869,26 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
 
   private numQueued = 0;
   private numFailed = 0;
+
+  /**
+   * The download size limit in force, as a multiple of the setting: raised
+   * while downloads finish quickly (see `TARGET_DOWNLOAD_MS`).
+   */
+  downloadSizeScale = 1;
+
+  noteDownloadTime(ms: number) {
+    if (ms < TARGET_DOWNLOAD_MS) {
+      this.downloadSizeScale = Math.min(
+        MAX_DOWNLOAD_SIZE_SCALE,
+        this.downloadSizeScale * DOWNLOAD_SIZE_SCALE_STEP,
+      );
+    } else if (ms > 2 * TARGET_DOWNLOAD_MS) {
+      this.downloadSizeScale = Math.max(
+        1,
+        this.downloadSizeScale / DOWNLOAD_SIZE_SCALE_STEP,
+      );
+    }
+  }
   private gpuMemoryGeneration = 0;
 
   constructor(rpc: RPC, options: any) {
@@ -1188,6 +1223,7 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
                 evictionCandidates,
                 evict,
                 keepMostlyDone ? Date.now() : undefined,
+                this.downloadSizeScale,
               )
             : tryToFreeCapacity(
                 size,

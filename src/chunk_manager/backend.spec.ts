@@ -21,6 +21,7 @@ import {
   ChunkQueueManager,
   ChunkSource,
   isDownloadMostlyDone,
+  MAX_DOWNLOAD_SIZE_SCALE,
 } from "#src/chunk_manager/backend.js";
 import {
   ChunkDownloadStatistics,
@@ -165,6 +166,23 @@ describe("download capacity by bytes", () => {
     t.source.estimate = 16 * MiB;
     await t.request(keys(30));
     expect(t.downloading().length).toBe(30);
+  });
+});
+
+describe("download size limit on a fast link", () => {
+  test("downloads that finish quickly raise the limit, slow ones lower it to the setting", async () => {
+    const t = setup();
+    t.source.estimate = 16 * MiB;
+    for (let i = 0; i < 20; ++i) t.queueManager.noteDownloadTime(500);
+    expect(t.queueManager.downloadSizeScale).toBe(MAX_DOWNLOAD_SIZE_SCALE);
+    await t.request(keys(40));
+    // 8 x 64 MiB / 16 MiB.
+    expect(t.downloading().length).toBe(32);
+    for (let i = 0; i < 20; ++i) t.queueManager.noteDownloadTime(5000);
+    expect(t.queueManager.downloadSizeScale).toBe(1);
+    // Times in between leave it as it is.
+    t.queueManager.noteDownloadTime(2000);
+    expect(t.queueManager.downloadSizeScale).toBe(1);
   });
 });
 
