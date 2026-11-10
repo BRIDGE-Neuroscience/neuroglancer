@@ -30,11 +30,25 @@ const tasks = new Map<
     reject: (error: any) => void;
   }
 >();
+/**
+ * At most this many decode workers.  Each holds its decoders' memory (a
+ * WebAssembly heap as large as the largest chunk it has decoded), so more
+ * workers cost memory, while downloads rather than decoding set the pace.
+ */
+export const MAX_ASYNC_COMPUTATION_WORKERS = 6;
+
 // On Safari, `navigator.hardwareConcurrency` is not defined.
 const maxWorkers =
   typeof navigator.hardwareConcurrency === "undefined"
     ? 4
-    : Math.min(12, navigator.hardwareConcurrency);
+    : Math.min(MAX_ASYNC_COMPUTATION_WORKERS, navigator.hardwareConcurrency);
+
+let numRetiredWorkers = 0;
+
+/** The pool's state, for tests and statistics. */
+export function getAsyncComputationPoolStatistics() {
+  return { numWorkers, maxWorkers, numRetiredWorkers };
+}
 let nextTaskId = 0;
 
 function returnWorker(worker: Worker) {
@@ -67,12 +81,22 @@ function launchWorker() {
       returnWorker(worker);
       return;
     }
-    const { id, value, error } = msg.data as {
+    const { id, value, error, retire } = msg.data as {
       id: number;
       value?: any;
       error?: string;
+      retire?: boolean;
     };
-    returnWorker(worker);
+    if (retire) {
+      // Its decoder's memory grew to fit a very large chunk: a fresh worker
+      // takes its place (if any work is waiting) with a small heap.
+      worker.terminate();
+      --numWorkers;
+      ++numRetiredWorkers;
+      if (pendingTasks.size > 0) launchWorker();
+    } else {
+      returnWorker(worker);
+    }
     const callbacks = tasks.get(id)!;
     tasks.delete(id);
     if (callbacks === undefined) return;

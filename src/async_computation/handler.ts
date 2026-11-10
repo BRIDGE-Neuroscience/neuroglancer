@@ -15,6 +15,7 @@
  */
 
 import type { AsyncComputationSpec } from "#src/async_computation/index.js";
+import { RETIRE_AFTER_BYTES } from "#src/async_computation/index.js";
 
 const handlers = new Map<
   string,
@@ -32,7 +33,15 @@ function setupChannel(port: DedicatedWorkerGlobalScope) {
         );
       }
       const { value, transfer } = await handler(...args);
-      port.postMessage({ id, value }, { transfer });
+      // A WebAssembly decoder's memory grows to fit its largest input and
+      // output and never shrinks: after a very large result, ask to be
+      // replaced by a fresh worker rather than keep that memory.
+      let bytes = 0;
+      for (const t of transfer ?? []) {
+        if (t instanceof ArrayBuffer) bytes += t.byteLength;
+      }
+      const retire = bytes >= RETIRE_AFTER_BYTES ? true : undefined;
+      port.postMessage({ id, value, retire }, { transfer });
     } catch (error) {
       port.postMessage({
         id,

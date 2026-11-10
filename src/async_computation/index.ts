@@ -18,6 +18,12 @@
  * @file Interface for defining transcode operations.
  */
 
+/**
+ * A worker that returns a result at least this large is retired once it has
+ * replied, and a fresh one takes its place (see `request.ts`).
+ */
+export const RETIRE_AFTER_BYTES = 32 * 1024 * 1024;
+
 export interface AsyncComputationSpec<Signature extends (...args: any) => any> {
   id: string;
   t?: Signature;
