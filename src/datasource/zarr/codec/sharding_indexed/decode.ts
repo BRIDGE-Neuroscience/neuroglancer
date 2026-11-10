@@ -27,6 +27,7 @@ import type {
 } from "#src/datasource/zarr/codec/sharding_indexed/resolve.js";
 import { ShardIndexLocation } from "#src/datasource/zarr/codec/sharding_indexed/resolve.js";
 import { FileByteRangeHandle } from "#src/kvstore/byte_range/file_handle.js";
+import { ByteRangeReadCoalescer } from "#src/kvstore/coalesce_reads.js";
 import type {
   ByteRangeRequest,
   ReadableKvStore,
@@ -36,7 +37,7 @@ import type {
   StatOptions,
   ByteRange,
 } from "#src/kvstore/index.js";
-import { KvStoreFileHandle } from "#src/kvstore/index.js";
+import { KvStoreFileHandle, readFileHandle } from "#src/kvstore/index.js";
 import type { Owned } from "#src/util/disposable.js";
 import { RefCounted } from "#src/util/disposable.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
@@ -96,6 +97,13 @@ class ShardedKvStore<BaseKey>
 {
   private indexCache: Owned<ShardIndexCache<BaseKey>>;
   private indexStrides: number[];
+
+  /**
+   * Whole sub-chunks of one shard asked for together (a view's chunks are
+   * started in one go) are read with one request per run of nearby ones.
+   */
+  coalescer: ByteRangeReadCoalescer<BaseKey>;
+
   constructor(
     private configuration: Configuration,
     chunkManager: ChunkManager,
@@ -104,6 +112,16 @@ class ShardedKvStore<BaseKey>
     super();
     this.indexCache = this.registerDisposer(
       makeIndexCache(chunkManager, base, configuration),
+    );
+    this.coalescer = new ByteRangeReadCoalescer<BaseKey>(
+      async (baseKey, byteRange, signal) => {
+        const response = await readFileHandle(
+          new KvStoreFileHandle(this.base, baseKey),
+          { signal, byteRange, strictByteRange: true, throwIfMissing: true },
+        );
+        return new Uint8Array(await response.response.arrayBuffer());
+      },
+      (baseKey) => this.base.getUrl(baseKey),
     );
     const { subChunkGridShape } = this.configuration;
     const rank = subChunkGridShape.length;
@@ -170,6 +188,19 @@ class ShardedKvStore<BaseKey>
   ): Promise<ReadResponse | undefined> {
     const fullByteRange = await this.findKey(key, options);
     if (fullByteRange === undefined) return undefined;
+    if (options.byteRange === undefined && fullByteRange.length > 0) {
+      const data = await this.coalescer.read(
+        key.base,
+        fullByteRange,
+        options.signal,
+      );
+      return {
+        response: new Response(data),
+        offset: 0,
+        length: data.length,
+        totalSize: fullByteRange.length,
+      };
+    }
     return new FileByteRangeHandle(
       new KvStoreFileHandle(this.base, key.base),
       fullByteRange,
